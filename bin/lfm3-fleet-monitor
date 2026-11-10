@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""
+LFM3-1.7B Fleet Monitor - Enhanced.
+
+Aggregates status from CPU (port 1238) and NPU (port 1239) inference servers,
+providing unified fleet health, performance, SLO tracking, and alerting.
+
+Usage:
+    lfm3-fleet-monitor --once          # Single check, print status
+    lfm3-fleet-monitor --watch         # Continuous monitoring
+    lfm3-fleet-monitor --json          # JSON output
+    lfm3-fleet-monitor --config fleet.yaml  # Use config file for servers
+    lfm3-fleet-monitor --webhook URL   # Send alerts to webhook
+    lfm3-fleet-monitor --history file.jsonl  # Append history to JSONL
+    lfm3-fleet-monitor --gen-prometheus-config  # Generate Prometheus scrape config
+    lfm3-fleet-monitor --gen-grafana-dashboard  # Generate Grafana dashboard JSON
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+DEFAULT_CPU_PORT = 1238
+DEFAULT_NPU_PORT = 1239
+DEFAULT_HOST = "0.0.0.0"
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load fleet config from YAML file."""
+    try:
+        import yaml
+    except ImportError:
+        print("Error: PyYAML required for config file. Install: pip install pyyaml", file=sys.stderr)
+        sys.exit(1)
+
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def fetch_json(url: str, timeout: float = 5.0) -> Dict[str, Any]:
+    """Fetch JSON from a URL, returning error dict on failure."""
+    try:
+        req = urllib.request.urlopen(url, timeout=timeout)
+        return json.loads(req.read().decode("utf-8"))
+    except Exception as e:
+        return {"error": str(e), "reachable": False}
+
+
+def fetch_server_status(port: int, host: str = DEFAULT_HOST) -> Dict[str, Any]:
+    """Fetch health, metrics, batch status, fleet status, and traces from a server."""
+    base = f"http://{host}:{port}"
+    health = fetch_json(f"{base}/health")
+    metrics = fetch_json(f"{base}/v1/metrics/detailed")
+    batch = fetch_json(f"{base}/v1/batch/status")
+    fleet = fetch_json(f"{base}/v1/fleet/status")
+    traces = fetch_json(f"{base}/v1/traces?limit=10")
+
+    result: Dict[str, Any] = {
+        "port": port,
+        "reachable": health.get("status") == "healthy",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if "error" not in health:
+        result.update(health)
+    if metrics and "error" not in metrics:
+        result["detailed_metrics"] = metrics
+    if batch and "error" not in batch:
+        result["batch_status"] = batch
+    if fleet and "error" not in fleet:
+        result["fleet_status"] = fleet
+    if traces and "error" not in traces:
+        result["traces"] = traces
+
+    return result
+
+
+def estimate_tps(status: Dict[str, Any]) -> Optional[float]:
+    """Estimate tokens/sec from batcher decode metrics."""
+    batcher = status.get("batch_status", {}).get("metrics", {})
+    decode_count = batcher.get("decode_count", 0)
+    avg_decode_ms = batcher.get("avg_decode_ms", 0)
+    if decode_count > 0 and avg_decode_ms > 0:
+        # Each decode step processes batch_size tokens
+        batch_size = batcher.get("max_batch_size", 4)
+        tps = (batch_size * 1000.0) / avg_decode_ms
+        return tps
+    return None
+
+
+def evaluate_alerts(
+    server_statuses: Dict[str, Dict[str, Any]],
+    min_tps: Optional[float] = None,
+    max_ttft: Optional[float] = None,
+    max_error_rate: Optional[float] = None,
+    max_latency_ms: Optional[float] = None,
+) -> List[Dict[str, str]]:
+    """Evaluate alert conditions across all servers."""
+    alerts: List[Dict[str, str]] = []
+
+    for label, status in server_statuses.items():
+        if not status.get("reachable", False):
+            alerts.append({
+                "server": label,
+                "severity": "critical",
+                "message": f"{label} server (port {status.get('port', '?')}) is unreachable",
+            })
+            continue
+
+        # TPS check
+        if min_tps is not None:
+            tps = estimate_tps(status)
+            if tps is not None and tps < min_tps:
+                alerts.append({
+                    "server": label,
+                    "severity": "warning",
+                    "message": f"{label} TPS ({tps:.1f}) below threshold ({min_tps})",
+                })
+
+        # TTFT check
+        if max_ttft is not None:
+            dm = status.get("detailed_metrics", {})
+            completed = dm.get("completed", {})
+            avg_ttft = completed.get("avg_ttft_ms", 0) / 1000.0
+            if avg_ttft > 0 and avg_ttft > max_ttft:
+                alerts.append({
+                    "server": label,
+                    "severity": "warning",
+                    "message": f"{label} TTFT ({avg_ttft:.2f}s) above threshold ({max_ttft}s)",
+                })
+
+        # Error rate check
+        if max_error_rate is not None:
+            fleet = status.get("fleet_status", {})
+            reliability = fleet.get("reliability", {})
+            error_rate = reliability.get("error_rate", 0)
+            if error_rate > max_error_rate:
+                alerts.append({
+                    "server": label,
+                    "severity": "warning",
+                    "message": f"{label} error rate ({error_rate*100:.1f}%) above threshold ({max_error_rate*100:.1f}%)",
+                })
+
+        # Latency check
+        if max_latency_ms is not None:
+            dm = status.get("detailed_metrics", {})
+            completed = dm.get("completed", {})
+            avg_latency = completed.get("avg_token_latency_ms", 0)
+            if avg_latency > 0 and avg_latency > max_latency_ms:
+                alerts.append({
+                    "server": label,
+                    "severity": "warning",
+                    "message": f"{label} avg token latency ({avg_latency:.1f}ms) above threshold ({max_latency_ms}ms)",
+                })
+
+    return alerts
+
+
+def send_webhook(webhook_url: str, alerts: List[Dict[str, str]], timestamp: str) -> bool:
+    """Send alerts to a webhook endpoint."""
+    try:
+        import json as _json
+        payload = {
+            "timestamp": timestamp,
+            "alerts": alerts,
+            "source": "lfm3-fleet-monitor",
+        }
+        data = _json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as e:
+        print(f"Webhook error: {e}", file=sys.stderr)
+        return False
+
+
+def append_history(history_path: str, cpu_status: Dict[str, Any],
+                   npu_status: Dict[str, Any], alerts: List[Dict[str, str]],
+                   timestamp: str) -> None:
+    """Append a snapshot to JSONL history file."""
+    record = {
+        "timestamp": timestamp,
+        "cpu": cpu_status,
+        "npu": npu_status,
+        "alerts": alerts,
+    }
+    try:
+        with open(history_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        print(f"History write error: {e}", file=sys.stderr)
+
+
+def format_status(server_statuses: Dict[str, Dict[str, Any]],
+                  alerts: List[Dict[str, str]], json_output: bool = False) -> str:
+    """Format fleet status for display."""
+    if json_output:
+        return json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "servers": server_statuses,
+            "alerts": alerts,
+        }, indent=2)
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append(f"LFM3-1.7B Fleet Status - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append("=" * 70)
+
+    for label, status in server_statuses.items():
+        lines.append(f"\n[{label} Server - Port {status.get('port', '?')}]")
+        if not status.get("reachable", False):
+            lines.append("  Status: UNREACHABLE")
+            if "error" in status:
+                lines.append(f"  Error: {status['error']}")
+            continue
+
+        lines.append(f"  Status: {status.get('status', 'unknown')}")
+        lines.append(f"  Model: {status.get('model', 'unknown')}")
+        lines.append(f"  Provider: {status.get('provider', 'unknown')}")
+        lines.append(f"  Uptime: {status.get('uptime_seconds', 0):.0f}s")
+        lines.append(f"  Active slots: {status.get('active_slots', 0)}")
+        lines.append(f"  Free slots: {status.get('free_slots', 0)}")
+        lines.append(f"  Avg decode: {status.get('avg_decode_ms', 0):.1f}ms")
+
+        dm = status.get("detailed_metrics", {})
+        if dm:
+            completed = dm.get("completed", {})
+            if completed:
+                lines.append(f"  Avg TTFT: {completed.get('avg_ttft_ms', 0):.1f}ms")
+                lines.append(f"  P95 TTFT: {completed.get('p95_ttft_ms', 0):.1f}ms")
+                lines.append(f"  Avg token latency: {completed.get('avg_token_latency_ms', 0):.2f}ms")
+                lines.append(f"  Total requests: {dm.get('total_requests', 0)}")
+                lines.append(f"  Completed: {dm.get('completed_requests', 0)}")
+
+        bm = status.get("batch_status", {}).get("metrics", {})
+        if bm:
+            lines.append(f"  Batcher prefill: {bm.get('prefill_count', 0)}")
+            lines.append(f"  Batcher decode: {bm.get('decode_count', 0)}")
+            lines.append(f"  Tokens generated: {bm.get('total_tokens_generated', 0)}")
+
+        # Recent traces
+        traces = status.get("traces", {})
+        if traces and "traces" in traces:
+            trace_list = traces.get("traces", [])
+            if trace_list:
+                lines.append(f"  Recent traces ({len(trace_list)}):")
+                for t in trace_list[:3]:
+                    ttft = t.get("ttft_ms", 0)
+                    tok_lat = t.get("total_latency_ms", 0)
+                    tok_count = t.get("total_tokens", 0)
+                    err = " [ERROR]" if t.get("error") else ""
+                    lines.append(f"    {t.get('req_id', '?')[:20]}: "
+                                 f"ttft={ttft:.1f}ms, "
+                                 f"latency={tok_lat:.1f}ms, "
+                                 f"tokens={tok_count}{err}")
+
+        # Estimated TPS
+        tps = estimate_tps(status)
+        if tps is not None:
+            lines.append(f"  Est. TPS: {tps:.1f}")
+
+    if alerts:
+        lines.append(f"\n{'=' * 70}")
+        lines.append("ALERTS:")
+        for alert in alerts:
+            sev = alert["severity"].upper()
+            lines.append(f"  [{sev}] {alert['server']}: {alert['message']}")
+    else:
+        lines.append(f"\n{'=' * 70}")
+        lines.append("No alerts - all servers healthy")
+
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+def gen_prometheus_config(servers: Dict[str, int]) -> str:
+    """Generate Prometheus scrape config for LFM3 servers."""
+    lines = []
+    lines.append("# Prometheus scrape config for LFM3-1.7B inference servers")
+    lines.append("# Save as prometheus-lfm3.yml and add to your prometheus config")
+    lines.append("")
+    lines.append("scrape_configs:")
+    lines.append("  - job_name: 'lfm3-inference'")
+    lines.append("    scrape_interval: 15s")
+    lines.append("    static_configs:")
+    for label, port in servers.items():
+        lines.append(f"      - targets: ['localhost:{port}']")
+        lines.append(f"        labels:")
+        lines.append(f"          server: '{label}'")
+        lines.append(f"          provider: '{label.lower()}'")
+    return "\n".join(lines)
+
+
+def gen_grafana_dashboard() -> str:
+    """Generate Grafana dashboard JSON for LFM3 monitoring."""
+    dashboard = {
+        "dashboard": {
+            "id": None,
+            "uid": "lfm3-inference",
+            "title": "LFM3-1.7B Inference Fleet",
+            "timezone": "utc",
+            "schemaVersion": 30,
+            "version": 1,
+            "refresh": "10s",
+            "panels": [
+                {
+                    "id": 1,
+                    "title": "Server Health",
+                    "type": "stat",
+                    "targets": [
+                        {
+                            "expr": 'up{job="lfm3-inference"}',
+                            "legendFormat": "{{server}}",
+                        }
+                    ],
+                },
+                {
+                    "id": 2,
+                    "title": "Tokens per Second",
+                    "type": "stat",
+                    "targets": [
+                        {
+                            "expr": 'lfm3_tokens_per_second',
+                            "legendFormat": "{{server}}",
+                        }
+                    ],
+                },
+                {
+                    "id": 3,
+                    "title": "Prefill Duration",
+                    "type": "stat",
+                    "targets": [
+                        {
+                            "expr": 'avg(lfm3_prefill_duration_seconds) by (server)',
+                            "legendFormat": "{{server}}",
+                        }
+                    ],
+                },
+                {
+                    "id": 4,
+                    "title": "Decode Duration",
+                    "type": "stat",
+                    "targets": [
+                        {
+                            "expr": 'avg(lfm3_decode_duration_seconds) by (server)',
+                            "legendFormat": "{{server}}",
+                        }
+                    ],
+                },
+                {
+                    "id": 5,
+                    "title": "Request Errors",
+                    "type": "stat",
+                    "targets": [
+                        {
+                            "expr": 'lfm3_requests_errors_total',
+                            "legendFormat": "{{server}}",
+                        }
+                    ],
+                },
+                {
+                    "id": 6,
+                    "title": "Active Slots",
+                    "type": "stat",
+                    "targets": [
+                        {
+                            "expr": 'lfm3_requests_in_progress',
+                            "legendFormat": "{{server}}",
+                        }
+                    ],
+                },
+            ],
+        }
+    }
+    return json.dumps(dashboard, indent=2)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="LFM3-1.7B Fleet Monitor"
+    )
+    parser.add_argument("--once", action="store_true",
+                         help="Run one check and exit")
+    parser.add_argument("--watch", action="store_true",
+                         help="Continuous monitoring (default if no flag)")
+    parser.add_argument("--json", action="store_true",
+                         help="JSON output format")
+    parser.add_argument("--interval", type=int, default=5,
+                         help="Watch interval in seconds")
+    parser.add_argument("--config", type=str, default=None,
+                         help="Fleet config YAML file")
+    parser.add_argument("--min-tps", type=float, default=None,
+                         help="Minimum TPS threshold (alert if below)")
+    parser.add_argument("--max-ttft", type=float, default=None,
+                         help="Maximum TTFT in seconds (alert if above)")
+    parser.add_argument("--max-error-rate", type=float, default=None,
+                         help="Maximum error rate 0.0-1.0 (alert if above)")
+    parser.add_argument("--max-latency-ms", type=float, default=None,
+                         help="Max token latency in ms (alert if above)")
+    parser.add_argument("--webhook", type=str, default=None,
+                         help="Webhook URL for alert notifications")
+    parser.add_argument("--history", type=str, default=None,
+                         help="Append history snapshots to JSONL file")
+    parser.add_argument("--gen-prometheus-config", action="store_true",
+                         help="Generate Prometheus scrape config and exit")
+    parser.add_argument("--gen-grafana-dashboard", action="store_true",
+                         help="Generate Grafana dashboard JSON and exit")
+
+    args = parser.parse_args()
+
+    if args.gen_prometheus_config:
+        servers = {"CPU": DEFAULT_CPU_PORT, "NPU": DEFAULT_NPU_PORT}
+        if args.config:
+            cfg = load_config(args.config)
+            servers = {}
+            for name, srv in cfg.get("servers", {}).items():
+                servers[name] = srv.get("port", 1238 if name.lower() == "cpu" else 1239)
+        print(gen_prometheus_config(servers))
+        return
+
+    if args.gen_grafana_dashboard:
+        print(gen_grafana_dashboard())
+        return
+
+    # Build server list
+    servers: Dict[str, int] = {"CPU": DEFAULT_CPU_PORT, "NPU": DEFAULT_NPU_PORT}
+    if args.config:
+        cfg = load_config(args.config)
+        servers = {}
+        for name, srv in cfg.get("servers", {}).items():
+            servers[name] = srv.get("port", 1238 if name.lower() == "cpu" else 1239)
+
+    if not args.once and not args.watch:
+        args.watch = True
+
+    while True:
+        server_statuses = {}
+        for label, port in servers.items():
+            host = DEFAULT_HOST
+            if args.config:
+                cfg = load_config(args.config)
+                host = cfg.get("servers", {}).get(label, {}).get("host", DEFAULT_HOST)
+            server_statuses[label] = fetch_server_status(port, host)
+
+        alerts = evaluate_alerts(
+            server_statuses,
+            min_tps=args.min_tps,
+            max_ttft=args.max_ttft,
+            max_error_rate=args.max_error_rate,
+            max_latency_ms=args.max_latency_ms,
+        )
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        print(format_status(server_statuses, alerts, json_output=args.json))
+
+        # Send webhook alerts
+        if alerts and args.webhook:
+            send_webhook(args.webhook, alerts, timestamp)
+
+        # Append history
+        if args.history:
+            append_history(args.history, server_statuses.get("CPU", {}),
+                          server_statuses.get("NPU", {}), alerts, timestamp)
+
+        if args.once:
+            break
+
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()

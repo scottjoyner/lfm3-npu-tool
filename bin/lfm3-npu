@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""
+LFM3-1.7B NPU Inference Tooling - Unified CLI
+
+Usage:
+    lfm3-npu <command> [options]
+
+Commands:
+    generate      Generate text from a prompt using NPU
+    server        Start/stop/restart/check inference server
+    bench         Benchmark inference performance (single request)
+    bench-batch   Benchmark concurrent inference performance
+    health        Check server health
+    convert       Convert model to NPU-compatible format
+    config        Show current configuration
+    status        Show overall system status
+    compare       Compare CPU vs NPU inference
+    watchdog      Run server watchdog (auto-restart unresponsive servers)
+
+Examples:
+    lfm3-npu generate "The quick brown fox" --max-tokens 30 --temperature 0.7
+    lfm3-npu server start cpu        # Start CPU batched server (port 1238)
+    lfm3-npu server start npu        # Start NPU batched server (port 1239)
+    lfm3-npu server status           # Check both servers
+    lfm3-npu bench --prompt "Hello" --tokens 50 --iterations 3
+    lfm3-npu bench-batch --concurrency 4 --tokens 50 --iterations 3
+    lfm3-npu health --server cpu
+    lfm3-npu health --server npu
+    lfm3-npu config
+    lfm3-npu status
+    lfm3-npu compare --cpu-model model.onnx --npu-model model_npu.onnx --prompts "Hello" "The quick brown fox"
+    lfm3-npu watchdog --once
+    lfm3-npu watchdog --daemon --interval 30
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import psutil
+import sys
+import time
+import yaml
+
+# Add the package directory to path
+SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(SERVER_DIR, "lib"))
+
+from lfm3_npu import (
+    Config,
+    LFM3NPUInference,
+    ServerManager,
+    bench_model,
+    bench_concurrency,
+    compare,
+    convert_model,
+    load_config,
+    watchdog_main,
+)
+
+# Fleet monitor functions (defined inline to avoid circular imports)
+def cmd_fleet_monitor(args) -> int:
+    """Run fleet monitor across CPU and NPU servers."""
+    import sys as _sys
+
+    # Build server list from config or defaults
+    servers = {"CPU": 1238, "NPU": 1239}
+    if args.config:
+        import yaml
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+        servers = {}
+        for name, srv in cfg.get("servers", {}).items():
+            servers[name] = srv.get("port", 1238 if name.lower() == "cpu" else 1239)
+
+    # Import fleet monitor functions from standalone script
+    import importlib.machinery
+    import importlib.util
+    fleet_mod_path = os.path.join(SERVER_DIR, "bin", "lfm3-fleet-monitor")
+    loader = importlib.machinery.SourceFileLoader("lfm3_fleet_monitor", fleet_mod_path)
+    spec = importlib.util.spec_from_loader("lfm3_fleet_monitor", loader)
+    fleet_mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(fleet_mod)
+    fetch_server_status = fleet_mod.fetch_server_status
+    evaluate_alerts = fleet_mod.evaluate_alerts
+    format_status = fleet_mod.format_status
+    gen_grafana_dashboard = fleet_mod.gen_grafana_dashboard
+    gen_prometheus_config = fleet_mod.gen_prometheus_config
+
+    if args.gen_prometheus_config:
+        print(gen_prometheus_config(servers))
+        return 0
+
+    if args.gen_grafana_dashboard:
+        print(gen_grafana_dashboard())
+        return 0
+
+    while True:
+        server_statuses = {}
+        for label, port in servers.items():
+            server_statuses[label] = fetch_server_status(port)
+
+        alerts = evaluate_alerts(
+            server_statuses,
+            min_tps=args.min_tps,
+            max_ttft=args.max_ttft,
+            max_error_rate=args.max_error_rate,
+            max_latency_ms=args.max_latency_ms,
+        )
+
+        print(format_status(server_statuses, alerts, json_output=args.json))
+
+        if args.once:
+            return 0
+
+        time.sleep(args.interval)
+
+    return 0
+
+
+def cmd_generate(args) -> int:
+    """Generate text from a prompt using NPU."""
+    config = load_config()
+    model_path = args.model or config.get("model.path")
+    tokenizer_path = args.tokenizer or config.get("model.tokenizer")
+
+    print(f"Loading model: {model_path}", flush=True)
+    print(f"Tokenizer: {tokenizer_path}", flush=True)
+
+    engine = LFM3NPUInference(model_path, tokenizer_path, config)
+    engine.load()
+    engine.warmup()
+
+    print(f"Prompt: '{args.prompt}'", flush=True)
+    print("Generated: ", end="", flush=True)
+
+    result = engine.generate(
+        args.prompt,
+        max_new_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+    )
+    print(result, flush=True)
+    print(f"\nFull text: '{args.prompt}{result}'", flush=True)
+    return 0
+
+
+def cmd_server(args) -> int:
+    """Start/stop/restart/check server status."""
+    config = load_config()
+    manager = ServerManager(config)
+
+    if args.action == "start":
+        return 0 if manager.start(args.server) else 1
+    elif args.action == "stop":
+        return 0 if manager.stop(args.server) else 1
+    elif args.action == "restart":
+        return 0 if manager.restart(args.server) else 1
+    elif args.action == "status":
+        manager.status(args.server)
+        return 0
+    return 1
+
+
+def cmd_bench(args) -> int:
+    """Benchmark inference performance."""
+    config = load_config()
+    model_path = args.model or config.get("model.path")
+    tokenizer_path = args.tokenizer or config.get("model.tokenizer")
+
+    results = bench_model(
+        model_path,
+        tokenizer_path,
+        prompt=args.prompt,
+        max_tokens=args.tokens,
+        iterations=args.iterations,
+        config=config,
+        concurrency=args.concurrency,
+    )
+
+    print("\n=== Benchmark Results ===")
+    print(f"  Prompt tokens:      {results['prompt_tokens']}")
+    print(f"  Max tokens:         {results['max_tokens']}")
+    print(f"  Iterations:         {results['iterations']}")
+    print(f"  Concurrency:        {results.get('concurrency', 1)}")
+    print(f"  Avg prefill:        {results['avg_prefill_ms']:.1f} ms")
+    print(f"  Avg TTFT:           {results.get('avg_ttft_ms', 0):.1f} ms")
+    print(f"  P95 TTFT:           {results.get('p95_ttft_ms', 0):.1f} ms")
+    print(f"  Avg decode:         {results['avg_decode_ms']:.1f} ms per {results['max_tokens']} tokens")
+    print(f"  Avg tokens/sec:     {results['avg_tokens_per_sec']:.1f}")
+    print(f"  Avg token latency:  {results.get('avg_token_latency_ms', 0):.1f} ms")
+    print(f"  P95 token latency:  {results.get('p95_token_latency_ms', 0):.1f} ms")
+    print(f"  P99 token latency:  {results.get('p99_token_latency_ms', 0):.1f} ms")
+    return 0
+
+
+def cmd_perf(args) -> int:
+    """Run detailed performance profiling across concurrency levels."""
+    from lfm3_npu.benchmark import bench_concurrency
+
+    config = load_config()
+    model_path = args.model or config.get("model.path")
+    tokenizer_path = args.tokenizer or config.get("model.tokenizer")
+
+    concurrency_levels = None
+    if args.concurrency:
+        concurrency_levels = [int(c) for c in args.concurrency.split(",")]
+
+    results = bench_concurrency(
+        model_path,
+        tokenizer_path,
+        prompt=args.prompt,
+        max_tokens=args.tokens,
+        concurrency_levels=concurrency_levels,
+        config=config,
+    )
+
+    print("\n=== Performance Profile Summary ===")
+    best_tps = 0
+    best_conc = 1
+    for level in results["results"]:
+        tps = level["avg_tokens_per_sec"]
+        if tps > best_tps:
+            best_tps = tps
+            best_conc = level["concurrency"]
+        print(
+            f"  Concurrency {level['concurrency']:2d}: "
+            f"{tps:6.1f} tok/s, "
+            f"TTFT={level.get('avg_ttft_ms', 0):6.1f}ms, "
+            f"prefill={level['avg_prefill_ms']:6.1f}ms"
+        )
+    print(
+        f"\n  Best concurrency: {best_conc} "
+        f"({best_tps:.1f} tok/s)"
+    )
+    return 0
+
+
+def cmd_health(args) -> int:
+    """Check server health."""
+    import json
+    import urllib.request
+
+    config = load_config()
+    server = args.server
+
+    if server == "cpu":
+        port = config.get("server.cpu.port", 1238)
+        host = config.get("server.cpu.host", "0.0.0.0")
+    elif server == "npu":
+        port = config.get("server.npu.port", 1239)
+        host = config.get("server.npu.host", "0.0.0.0")
+    else:
+        print(f"Unknown server: {server}")
+        return 1
+
+    try:
+        req = urllib.request.urlopen(f"http://{host}:{port}/health", timeout=5)
+        data = json.loads(req.read())
+        print(f"{server.upper()} server at {host}:{port}: HEALTHY")
+        print(json.dumps(data, indent=2))
+        return 0
+    except Exception as e:
+        print(f"{server.upper()} server at {host}:{port}: UNREACHABLE ({e})")
+        return 1
+
+
+def cmd_convert(args) -> int:
+    """Convert model to NPU-compatible format."""
+    from lfm3_npu.converter import convert
+
+    print(f"Converting model: {args.model} -> {args.output}")
+    print(f"Method: {args.method}")
+    output_path = convert(args.model, args.output, args.method)
+    print(f"\nConversion complete: {output_path}")
+    return 0
+
+
+def cmd_config(args) -> int:
+    """Show current configuration."""
+    import yaml
+
+    config = load_config()
+    print(yaml.dump(config.to_dict(), default_flow_style=False))
+    return 0
+
+
+def cmd_status(args) -> int:
+    """Show overall system status."""
+    import json
+    import subprocess
+    import urllib.request
+
+    config = load_config()
+
+    print("=" * 60)
+    print("LFM3-1.7B NPU Tooling - System Status")
+    print("=" * 60)
+
+    # NPU device
+    print("\n[NPU Device]")
+    try:
+        result = subprocess.run(
+            ["xrt-smi", "examine"], capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.split("\n"):
+            if "NPU" in line or "Device" in line or "Architecture" in line or "Firmware" in line:
+                print(f"  {line.strip()}")
+    except Exception:
+        print("  xrt-smi not available")
+
+    # Servers
+    print("\n[Servers]")
+    manager = ServerManager(config)
+    for server in ["cpu", "npu"]:
+        try:
+            proc = manager.get_process(server)
+            if proc:
+                print(f"  {server.upper()}: RUNNING (PID: {proc.pid})")
+            else:
+                print(f"  {server.upper()}: NOT RUNNING")
+        except psutil.NoSuchProcess:
+            print(f"  {server.upper()}: NOT RUNNING (stale PID)")
+
+    # Models
+    print("\n[Models]")
+    model_path = config.get("model.path")
+    print(f"  Active model: {model_path}")
+    print(f"  Model exists: {os.path.exists(model_path)}")
+
+    # Environment
+    print("\n[Environment]")
+    print(f"  Python: {config.get('npu.python_executable', '/usr/bin/python3')}")
+    ld_path = config.get("npu.ld_library_path", [])
+    print(f"  LD_LIBRARY_PATH parts: {len(ld_path)}")
+
+    return 0
+
+
+def cmd_compare(args) -> int:
+    """Compare CPU vs NPU inference performance and output quality."""
+    config = load_config()
+    cpu_model = args.cpu_model or config.get("server.cpu.model_path")
+    npu_model = args.npu_model or config.get("model.path")
+    tokenizer_path = args.tokenizer or config.get("model.tokenizer")
+
+    prompts = args.prompts or ["The quick brown fox", "Hello world", "Once upon a time"]
+
+    print(f"Comparing CPU vs NPU inference")
+    print(f"  CPU model:  {cpu_model}")
+    print(f"  NPU model:  {npu_model}")
+    print(f"  Prompts:    {len(prompts)}")
+    print(f"  Max tokens: {args.max_tokens}")
+    print()
+
+    results = compare(
+        cpu_model,
+        npu_model,
+        tokenizer_path,
+        prompts,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        config=config,
+    )
+
+    summary = results["summary"]
+    print("\n" + "=" * 60)
+    print("FINAL COMPARISON SUMMARY")
+    print("=" * 60)
+    print(f"  Total prompts: {summary['total_prompts']}")
+    print(f"  Text matches:  {summary['text_matches']}/{summary['total_prompts']} "
+          f"({summary['match_rate']*100:.1f}%)")
+    print(f"  Avg CPU:  {summary['avg_cpu_tokens_per_sec']:.1f} tok/s, "
+          f"prefill={summary['avg_cpu_prefill_ms']:.1f}ms")
+    print(f"  Avg NPU:  {summary['avg_npu_tokens_per_sec']:.1f} tok/s, "
+          f"prefill={summary['avg_npu_prefill_ms']:.1f}ms")
+    print(f"  NPU/CPU speed ratio: {summary['avg_speed_ratio']:.2f}x")
+    return 0
+
+
+def cmd_watchdog(args) -> int:
+    """Run the server watchdog."""
+    from lfm3_npu.watchdog import Watchdog
+    config = load_config()
+    watchdog = Watchdog(
+        config,
+        check_interval=args.interval,
+        min_tps=args.min_tps,
+        max_error_rate=args.max_error_rate,
+        max_latency_ms=args.max_latency_ms,
+        webhook_url=args.webhook,
+        cooldown_seconds=args.cooldown,
+        enable_degradation=args.degrade,
+        min_concurrent_requests=args.min_concurrent,
+    )
+    if args.status:
+        import json
+        status = watchdog.get_status(args.servers)
+        print(json.dumps(status, indent=2))
+        return 0
+    if args.once:
+        results = watchdog.check_once(args.servers)
+        for server, action_taken in results.items():
+            action = "restarted" if action_taken else "healthy"
+            print(f"Watchdog: {server.upper()} - {action}")
+        return 0
+    else:
+        watchdog.run_forever(args.servers)
+        return 0
+
+
+def main() -> int:
+    """Main entry point for the CLI."""
+    parser = argparse.ArgumentParser(
+        description="LFM3-1.7B NPU Inference Tooling",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # generate
+    gen_parser = subparsers.add_parser("generate", help="Generate text from prompt")
+    gen_parser.add_argument("prompt", help="Input prompt text")
+    gen_parser.add_argument("--max-tokens", type=int, default=50, help="Max tokens to generate")
+    gen_parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+    gen_parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling threshold")
+    gen_parser.add_argument("--model", help="Model path (overrides config)")
+    gen_parser.add_argument("--tokenizer", help="Tokenizer path (overrides config)")
+    gen_parser.set_defaults(func=cmd_generate)
+
+    # server
+    server_parser = subparsers.add_parser("server", help="Manage inference servers")
+    server_parser.add_argument("action", choices=["start", "stop", "restart", "status"], help="Action")
+    server_parser.add_argument("server", choices=["cpu", "npu"], help="Server to manage")
+    server_parser.set_defaults(func=cmd_server)
+
+    # bench
+    bench_parser = subparsers.add_parser("bench", help="Benchmark inference performance")
+    bench_parser.add_argument("--prompt", default="The quick brown fox", help="Benchmark prompt")
+    bench_parser.add_argument("--tokens", type=int, default=50, help="Tokens to generate per iteration")
+    bench_parser.add_argument("--iterations", type=int, default=3, help="Number of iterations")
+    bench_parser.add_argument("--concurrency", type=int, default=1, help="Concurrency level (1=single request)")
+    bench_parser.add_argument("--model", help="Model path (overrides config)")
+    bench_parser.add_argument("--tokenizer", help="Tokenizer path (overrides config)")
+    bench_parser.set_defaults(func=cmd_bench)
+
+    # perf
+    perf_parser = subparsers.add_parser("perf", help="Performance profiling across concurrency levels")
+    perf_parser.add_argument("--prompt", default="The quick brown fox", help="Benchmark prompt")
+    perf_parser.add_argument("--tokens", type=int, default=50, help="Tokens to generate per iteration")
+    perf_parser.add_argument("--concurrency", help="Comma-separated concurrency levels (e.g., 1,2,4,8)")
+    perf_parser.add_argument("--model", help="Model path (overrides config)")
+    perf_parser.add_argument("--tokenizer", help="Tokenizer path (overrides config)")
+    perf_parser.set_defaults(func=cmd_perf)
+
+    # health
+    health_parser = subparsers.add_parser("health", help="Check server health")
+    health_parser.add_argument("server", choices=["cpu", "npu"], help="Server to check")
+    health_parser.set_defaults(func=cmd_health)
+
+    # convert
+    convert_parser = subparsers.add_parser("convert", help="Convert model to NPU-compatible format")
+    convert_parser.add_argument("--model", required=True, help="Input model path")
+    convert_parser.add_argument("--output", help="Output model path")
+    convert_parser.add_argument("--method", choices=["centertap", "bypass"], default="centertap", help="Conversion method")
+    convert_parser.set_defaults(func=cmd_convert)
+
+    # config
+    config_parser = subparsers.add_parser("config", help="Show configuration")
+    config_parser.set_defaults(func=cmd_config)
+
+    # status
+    status_parser = subparsers.add_parser("status", help="Show system status")
+    status_parser.set_defaults(func=cmd_status)
+
+    # compare
+    compare_parser = subparsers.add_parser("compare", help="Compare CPU vs NPU inference")
+    compare_parser.add_argument("--cpu-model", default="/media/scott/data/lfm3_oga_export/model.onnx", help="CPU model path")
+    compare_parser.add_argument("--npu-model", default="/media/scott/data/lfm3_conv_centertap.onnx", help="NPU model path")
+    compare_parser.add_argument("--tokenizer", default="/media/scott/data/lfm3_oga_export/tokenizer.json", help="Tokenizer path")
+    compare_parser.add_argument("--prompts", nargs="+", default=["The quick brown fox", "Hello world", "Once upon a time"],
+                                help="Prompts to compare")
+    compare_parser.add_argument("--max-tokens", type=int, default=30, help="Max tokens per generation")
+    compare_parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+    compare_parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling threshold")
+    compare_parser.set_defaults(func=cmd_compare)
+
+    # watchdog
+    watchdog_parser = subparsers.add_parser("watchdog", help="Run server watchdog")
+    watchdog_parser.add_argument("--servers", nargs="+", default=["cpu", "npu"],
+                                 choices=["cpu", "npu"], help="Servers to monitor")
+    watchdog_parser.add_argument("--interval", type=int, default=30, help="Check interval in seconds")
+    watchdog_parser.add_argument("--once", action="store_true", help="Run one check and exit")
+    watchdog_parser.add_argument("--daemon", action="store_true", help="Run as daemon (foreground)")
+    watchdog_parser.add_argument("--min-tps", type=float, default=None,
+                                 help="Minimum tokens/sec threshold (restart if below)")
+    watchdog_parser.add_argument("--max-error-rate", type=float, default=None,
+                                 help="Maximum error rate 0.0-1.0 (restart if above)")
+    watchdog_parser.add_argument("--max-latency-ms", type=float, default=None,
+                                 help="Max token latency in ms (restart if above)")
+    watchdog_parser.add_argument("--webhook", type=str, default=None,
+                                 help="Webhook URL for alert notifications")
+    watchdog_parser.add_argument("--cooldown", type=int, default=300,
+                                 help="Cooldown period between restarts (seconds)")
+    watchdog_parser.add_argument("--degrade", action="store_true",
+                                 help="Enable graceful degradation (reduce concurrency before restart)")
+    watchdog_parser.add_argument("--min-concurrent", type=int, default=1,
+                                 help="Minimum concurrent requests when degrading")
+    watchdog_parser.add_argument("--status", action="store_true",
+                                 help="Show detailed status and exit")
+    watchdog_parser.set_defaults(func=cmd_watchdog)
+
+    # fleet-monitor
+    fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")
+    fleet_parser.add_argument("--once", action="store_true", help="Run one check and exit")
+    fleet_parser.add_argument("--watch", action="store_true", help="Continuous monitoring")
+    fleet_parser.add_argument("--json", action="store_true", help="JSON output format")
+    fleet_parser.add_argument("--interval", type=int, default=5, help="Watch interval in seconds")
+    fleet_parser.add_argument("--config", type=str, default=None,
+                              help="Fleet config YAML file")
+    fleet_parser.add_argument("--min-tps", type=float, default=None,
+                              help="Minimum TPS threshold (alert if below)")
+    fleet_parser.add_argument("--max-ttft", type=float, default=None,
+                              help="Maximum TTFT in seconds (alert if above)")
+    fleet_parser.add_argument("--max-error-rate", type=float, default=None,
+                              help="Maximum error rate 0.0-1.0 (alert if above)")
+    fleet_parser.add_argument("--max-latency-ms", type=float, default=None,
+                              help="Max token latency in ms (alert if above)")
+    fleet_parser.add_argument("--webhook", type=str, default=None,
+                              help="Webhook URL for alert notifications")
+    fleet_parser.add_argument("--history", type=str, default=None,
+                              help="Append history snapshots to JSONL file")
+    fleet_parser.add_argument("--gen-prometheus-config", action="store_true",
+                              help="Generate Prometheus scrape config and exit")
+    fleet_parser.add_argument("--gen-grafana-dashboard", action="store_true",
+                              help="Generate Grafana dashboard JSON and exit")
+    fleet_parser.set_defaults(func=cmd_fleet_monitor)
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        return 1
+
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

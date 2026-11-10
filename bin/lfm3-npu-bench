@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""
+LFM3-1.7B NPU Benchmark Tool
+
+Benchmark CPU and NPU inference performance and compare results.
+"""
+
+import sys
+import os
+
+SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(SERVER_DIR, "lib"))
+
+from lfm3_npu import bench_model, load_config
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Benchmark LFM3-1.7B inference performance"
+    )
+    parser.add_argument("--prompt", default="The quick brown fox", help="Benchmark prompt")
+    parser.add_argument("--tokens", type=int, default=50, help="Tokens to generate per iteration")
+    parser.add_argument("--iterations", type=int, default=3, help="Number of iterations")
+    parser.add_argument("--model", help="Model path (overrides config)")
+    parser.add_argument("--tokenizer", help="Tokenizer path (overrides config)")
+    parser.add_argument("--compare", action="store_true", help="Compare CPU vs NPU models")
+
+    args = parser.parse_args()
+
+    config = load_config()
+
+    if args.compare:
+        print("=" * 60)
+        print("CPU vs NPU Benchmark Comparison")
+        print("=" * 60)
+
+        # CPU model
+        print("\n--- CPU Model ---")
+        cpu_results = bench_model(
+            config.get("server.cpu.model_path"),
+            config.get("model.tokenizer"),
+            prompt=args.prompt,
+            max_tokens=args.tokens,
+            iterations=args.iterations,
+            config=config,
+        )
+
+        print("\n--- NPU Model ---")
+        npu_results = bench_model(
+            config.get("model.path"),
+            config.get("model.tokenizer"),
+            prompt=args.prompt,
+            max_tokens=args.tokens,
+            iterations=args.iterations,
+            config=config,
+        )
+
+        print("\n--- Comparison ---")
+        print(f"  Prefill: CPU={cpu_results['avg_prefill_ms']:.1f}ms, NPU={npu_results['avg_prefill_ms']:.1f}ms")
+        print(f"  Decode:  CPU={cpu_results['avg_decode_ms']:.1f}ms, NPU={npu_results['avg_decode_ms']:.1f}ms")
+        print(f"  Tokens/s: CPU={cpu_results['avg_tokens_per_sec']:.1f}, NPU={npu_results['avg_tokens_per_sec']:.1f}")
+        speedup = cpu_results['avg_tokens_per_sec'] / npu_results['avg_tokens_per_sec']
+        print(f"  NPU/CPU speed ratio: {speedup:.2f}x")
+    else:
+        model_path = args.model or config.get("model.path")
+        tokenizer_path = args.tokenizer or config.get("model.tokenizer")
+        bench_model(
+            model_path,
+            tokenizer_path,
+            prompt=args.prompt,
+            max_tokens=args.tokens,
+            iterations=args.iterations,
+            config=config,
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

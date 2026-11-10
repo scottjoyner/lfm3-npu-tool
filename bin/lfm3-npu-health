@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""
+LFM3-1.7B NPU Health Check
+
+Check the health of CPU and NPU inference servers.
+"""
+
+import sys
+import os
+
+SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(SERVER_DIR, "lib"))
+
+from lfm3_npu import load_config, ServerManager
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: lfm3-npu-health <cpu|npu>")
+        print("\nExamples:")
+        print("  lfm3-npu-health npu    # Check NPU server health")
+        print("  lfm3-npu-health cpu    # Check CPU server health")
+        return 1
+
+    server = sys.argv[1]
+
+    config = load_config()
+    manager = ServerManager(config)
+
+    proc = manager.get_process(server)
+    if proc is None:
+        print(f"{server.upper()} server: NOT RUNNING")
+        return 1
+
+    import urllib.request
+    import json
+
+    if server == "cpu":
+        port = config.get("server.cpu.port", 1238)
+        host = config.get("server.cpu.host", "0.0.0.0")
+    else:
+        port = config.get("server.npu.port", 1239)
+        host = config.get("server.npu.host", "0.0.0.0")
+
+    try:
+        req = urllib.request.urlopen(f"http://{host}:{port}/health", timeout=5)
+        data = json.loads(req.read())
+        print(f"{server.upper()} server at {host}:{port}: HEALTHY")
+        print(json.dumps(data, indent=2))
+        return 0
+    except Exception as e:
+        print(f"{server.upper()} server at {host}:{port}: UNREACHABLE ({e})")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

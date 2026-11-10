@@ -1,0 +1,16 @@
+[Unit]
+Description=LFM3-1.7B NPU Inference Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/media/scott/data/lfm3-npu-tool
+Environment=TMPDIR=/media/scott/data/tmp
+Environment=LD_LIBRARY_PATH=/media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/flexml/flexml_extras/lib:/media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/voe/lib:/opt/xilinx/xrt/lib
+ExecStart=/media/scott/data/ryzen-ai-venv/bin/python /media/scott/data/lfm3-npu-tool/lib/lfm3_npu/npu_server.py --host 0.0.0.0 --port 1239
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

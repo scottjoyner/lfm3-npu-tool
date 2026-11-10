@@ -1,0 +1,57 @@
+# LFM3-1.7B NPU Inference Tooling Configuration
+# Copy this file to ~/.config/lfm3-npu/config.yaml to customize
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  path: /media/scott/data/lfm3_conv_centertap.onnx
+  tokenizer: /media/scott/data/lfm3_oga_export/tokenizer.json
+  type: lfm3-1.7b-npu
+
+# =============================================================================
+# NPU Configuration (VitisAI ExecutionProvider)
+# =============================================================================
+npu:
+  provider: VitisAIExecutionProvider
+  device_index: 0
+  custom_ops_lib: /media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/voe/lib/libonnxruntime_vitis_ai_custom_ops.so
+  python_executable: /media/scott/data/ryzen-ai-venv/bin/python
+  ld_library_path:
+    - /media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/flexml/flexml_extras/lib
+    - /media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/voe/lib
+    - /opt/xilinx/xrt/lib
+
+# =============================================================================
+# Server Configuration
+# =============================================================================
+server:
+  cpu:
+    port: 1238
+    host: 0.0.0.0
+    model_path: /media/scott/data/lfm3_oga_export/model.onnx
+    kv_quant_model_path: /media/scott/data/lfm3_oga_export/model_kv_quant.onnx
+    use_kv_quant: false
+    model_type: cpu_onnx
+
+  npu:
+    port: 1239
+    host: 0.0.0.0
+    model_path: /media/scott/data/lfm3_oga_export/model.onnx
+    model_type: npu_ryzenai
+
+# =============================================================================
+# Generation Defaults
+# =============================================================================
+generation:
+  max_tokens: 50
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true
+
+# =============================================================================
+# Logging
+# =============================================================================
+logging:
+  level: INFO
+  log_dir: /media/scott/data/lfm3-npu-tool/var/log
