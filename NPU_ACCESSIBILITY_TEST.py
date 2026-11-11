@@ -69,12 +69,14 @@ def test_npu_accessibility():
     # Test 4: Create kernel and buffers
     print("\n[4] Creating kernel and buffers...")
     kname = kernels[0].get_name()
+    # Get num_args from xclbin kernel object (hw_ctx kernel doesn't have get_num_args)
+    num_args = kernels[0].get_num_args()
     kernel = pyxrt.kernel(hw_ctx, kname)
-    print(f"   Kernel: {kname}")
+    print(f"   Kernel: {kname}, args: {num_args}")
     
     try:
         buffers = []
-        for i in range(kernel.get_num_args()):
+        for i in range(num_args):
             buf = pyxrt.bo(device, 4096, pyxrt.bo.flags.cacheable, 0)
             data = np.arange(1024, dtype=np.int32) + i * 256
             buf.write(data, 0)
@@ -90,11 +92,19 @@ def test_npu_accessibility():
         print("\nRESULT: Buffer creation failed")
         return False
     
-    # Test 5: Run kernel
+    # Test 5: Run kernel (may fail due to bank mismatch with non-Strix xclbin)
     print("\n[5] Running kernel on NPU...")
     run = pyxrt.run(kernel)
     for i, buf in enumerate(buffers):
-        run.set_arg(i, buf)
+        try:
+            run.set_arg(i, buf)
+        except Exception as e:
+            print(f"   set_arg({i}) failed: {type(e).__name__}: {e}")
+            print("   NOTE: Existing xclbins (LFM2, Qwen2.5, etc.) were compiled for")
+            print("         a different NPU platform expecting bank 131071. Strix Halo")
+            print("         only has banks 0 (HOST) and 1 (SRAM). Kernel execution requires")
+            print("         an LFM3-compiled xclbin for Strix Halo.")
+            return False  # Partial success: device, hw_context, kernels, buffers all work
     
     try:
         run.start()
@@ -109,7 +119,7 @@ def test_npu_accessibility():
         return True
     except Exception as e:
         print(f"   Kernel run failed: {type(e).__name__}: {e}")
-        return False
+        return False  # Partial success
 
 if __name__ == "__main__":
     success = test_npu_accessibility()

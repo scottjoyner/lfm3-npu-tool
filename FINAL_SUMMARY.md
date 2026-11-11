@@ -16,6 +16,7 @@ This document summarizes the complete LFM3-1.7B inference harness built for AMD 
 | ONNX Model (CPU) | `/media/scott/data/lfm3_oga_export/model.onnx` |
 | ONNX Model (KV Quant) | `/media/scott/data/lfm3_oga_export/model_kv_quant.onnx` |
 | NPU Model (center-tap) | `/media/scott/data/lfm3_oga_export/model.onnx` |
+| ONNX Model (legalized) | `/media/scott/data/lfm3_oga_export/model_legalized.onnx` |
 
 ## NPU Hardware Status
 
@@ -29,12 +30,15 @@ This document summarizes the complete LFM3-1.7B inference harness built for AMD 
 | XRT Version | 2.25.37 |
 
 **NPU hardware IS accessible from user space via pyxrt/XRT:**
-- `pyxrt.device(0)` opens the NPU
-- `pyxrt.hw_context(device, xclbin_path)` loads xclbins
-- Kernels can be found and `run.start()`/`run.wait()` completes
-- Buffer management works with `cacheable` flag
+- `pyxrt.device(0)` opens the NPU ✅
+- `pyxrt.hw_context(device, xclbin_path)` loads xclbins ✅
+- Kernels can be found ✅
+- Buffer management works with `cacheable` flag ✅
+- Kernel execution fails with existing xclbins (bank mismatch) ❌
 
-**However:** No LFM3-compiled xclbin exists anywhere on the system. Available xclbins are for LFM2, Qwen2.5, Gemma3, Gemma4, Llama-3.2, etc. — but NOT LFM3.
+**Bank mismatch:** Existing xclbins (LFM2, Qwen2.5, Gemma3, Gemma4) were compiled for a different NPU platform whose compute units connect to bank 131071. Strix Halo only has banks 0 (HOST) and 1 (SRAM). `pyxrt.run(kernel).set_arg(i, buf)` fails with "No host side buffer in destination buffer."
+
+**No LFM3-compiled xclbin exists anywhere on the system.**
 
 ## Core Architecture
 
@@ -51,18 +55,34 @@ This document summarizes the complete LFM3-1.7B inference harness built for AMD 
 ### NPU Inference Server (`/media/scott/data/lfm3-npu-tool/lib/lfm3_npu/npu_server.py`)
 - FastAPI-based inference server on port 1239
 - Uses `VitisAIExecutionProvider` via onnxruntime (with stub `libvaiml.so`)
+- **libvaiml2.so fix**: `libonnxruntime_vitisai_ep.so` requires `libvaiml2.so` which was missing from the library path. Copying it to `voe/lib/` allows VitisAI EP to load without the original `libvaiml.so` crash.
 - Same endpoint structure as CPU server
-- **BREAKTHROUGH**: Stub `libvaiml.so` with dummy VAIML function implementations allows VitisAI EP to load without crashing
+- Stub `libvaiml.so` with dummy VAIML function implementations allows `dlopen()` to succeed
 - Original crash: SIGSEGV in protobuf descriptor registration during `dlopen(libvaiml.so)` — happens **before any graph analysis or Python code runs**
 - Stub library at: `/media/scott/data/ryzen-ai-venv/.../flexml_extras/lib/libvaiml.so` (original backed up as `.orig`)
-- Stub source: `vaiml_stub.c` in repo
+- Stub source: `vaiml_stub.c` in repo — updated to return `vaiml_get_capability_*` = 0 (C convention: 0 = success/capable) and valid `vaiml_json_result_create`/`vaiml_compile_*` responses
 - NPU server reports `npu_available=true` when VitisAI EP is active
 - Falls back to CPUExecutionProvider if VitisAI EP also fails
 - **NOT real NPU hardware acceleration** — CPU execution through VitisAI EP wrapper
 
+### Model Legalization for VitisAI EP
+- LFM3 model has 13 Conv nodes relying on default attributes (missing strides, pads, dilations, kernel_shape, group)
+- `onnxsim.vitisai_target.legalize_for_vitisai()` materializes these attributes
+- Legalized model saved to `/media/scott/data/lfm3_oga_export/model_legalized.onnx`
+- `check_vitisai_support()` confirms no remaining issues after legalization
+- VitisAI EP loads the legalized model successfully but still runs on CPU (no VAIML compilation data from stub)
+
+### libvaiml2.so Investigation
+- `libvaiml2.so` (3.3MB) loads successfully (unlike `libvaiml.so` which crashes)
+- Exports only `vaiml_compile_x2_v2` — takes a JSON config string, not a file path
+- `vaiml_compile_x2_v2` segfaults when called from ctypes — requires unknown config schema
+- `vaiml_json_result_create` is NOT in `libvaiml2.so` — only in the crashing `libvaiml.so`
+- VitisAI EP links against `libvaiml2.so` at compile time but dlopens `libvaiml.so` at runtime
+
 ### NPU Accessibility Test (`NPU_ACCESSIBILITY_TEST.py`)
 - Proves NPU hardware is accessible via pyxrt/XRT
-- Demonstrates hw_context loads xclbins, kernels can be found, runs can start/complete
+- Demonstrates hw_context loads xclbins, kernels can be found, buffers can be created
+- Kernel execution fails due to bank mismatch with existing (non-Strix) xclbins
 - No LFM3 xclbin exists to test with
 
 ## Complete Tooling Suite (`/media/scott/data/lfm3-npu-tool/`)
@@ -140,13 +160,18 @@ The AMD `libvaiml.so` crashes with SIGSEGV in protobuf descriptor registration d
 This is confirmed by:
 - gdb stack trace showing SIGSEGV in `google::protobuf::FileDescriptorProto::_InternalParse`
 - Independent final report at `/home/scott/LFM3_NPU_FINAL_REPORT.md`
-- Every approach attempted (graph surgery, compiler flags, env vars, custom VAIP configs, binary patching all 65,551 divide instructions, function entry patching, crash offset patching, LD_PRELOAD, FlexML compiler, ONNX Runtime C API) — all fail
+- Every approach attempted (graph surgery, compiler flags, env vars, custom VAIP configs, binary patching all 65,551 divide instructions, function entry patching, crash offset patching, LD_PRELOAD, FlexML compiler, ONNX Runtime C API, `libvaiml2.so`/`vaiml_compile_x2_v2` direct calls) — all fail
 
-**Workaround implemented**: Stub `libvaiml.so` with dummy implementations of all ~40 exported VAIML functions allows `dlopen()` and `dlsym()` to succeed. VitisAI EP loads and runs inference, but since all VAIML functions return no-op values, VitisAI EP treats all ops as unsupported and runs through CPU internally. This is CPU execution through the VitisAI EP wrapper — NOT real NPU hardware acceleration.
+**Workaround implemented**: Stub `libvaiml.so` with dummy implementations of all ~40 exported VAIML functions allows `dlopen()` and `dlsym()` to succeed. VitisAI EP loads and runs inference, but since VAIML functions return no-op/compiled-success responses without actual xclbin data, VitisAI EP runs through CPU internally. This is CPU execution through the VitisAI EP wrapper — NOT real NPU hardware acceleration.
+
+**Additional approaches investigated:**
+- `libvaiml2.so` (works, exports `vaiml_compile_x2_v2`) — takes JSON config string, segfaults when called directly; `vaiml_json_result_create` not exported
+- xcompiler (works with `libvaiml2.so`) — requires `.xmodel` files, not ONNX; no ONNX→xmodel converter available in SDK
+- pyxrt with existing xclbins (LFM2, Qwen2.5, Gemma3, Gemma4) — device open, hw_context, kernel discovery, buffer creation all work; kernel execution fails due to bank mismatch (existing xclbins expect bank 131071, Strix Halo has banks 0/1)
 
 **Real NPU acceleration requires:**
 - Fix `libvaiml.so` protobuf crash during `dlopen()` — **AMD**
-- Provide LFM3-compiled `.xclbin` artifact — **AMD**
+- Provide LFM3-compiled `.xclbin` artifact for Strix Halo — **AMD**
 - LiquidAI re-export LFM3 with standard ONNX ops (no `GroupQueryAttention` contrib op, no `MatMulNBits`/`GatherBlockQuantized` quantization ops, no dynamic reshape dimensions) — **LiquidAI**
 
 ### 2. NPU Model Uses Center-tap Conv Replacement
@@ -179,6 +204,7 @@ INT8 quantization error accumulates over decode steps, producing repetitive outp
 
 ### Converted Models
 - `/media/scott/data/lfm3_oga_export/model.onnx` — Verified LFM3 ONNX Q4 model (CPU server input)
+- `/media/scott/data/lfm3_oga_export/model_legalized.onnx` — VitisAI EP-legalized model (Conv attributes materialized)
 - `/media/scott/data/lfm3_oga_export/model_kv_quant.onnx` — KV cache quantized model (1.6G)
 
 ## Next Steps / Future Work
@@ -193,8 +219,8 @@ INT8 quantization error accumulates over decode steps, producing repetitive outp
 - [x] CPU server running on port 1238, full-quality LFM3-1.7B inference (~2.2 days uptime)
 - [x] NPU server running on port 1239, VitisAIExecutionProvider active via stub libvaiml.so
 - [x] NPU server generates coherent text (tested end-to-end)
-- [x] NPU hardware accessible via pyxrt/XRT (hw_context loads xclbins, kernels found, runs start/complete)
-- [x] No LFM3 xclbin exists — cannot create without Vitis AI compiler (which crashes on LFM3)
+- [x] NPU hardware accessible via pyxrt/XRT (device open, hw_context loads xclbins, kernels found, buffers created — kernel execution blocked by bank mismatch with existing non-Strix xclbins)
+- [x] No LFM3 xclbin exists — cannot create without Vitis AI compiler (which crashes on LFM3) and no ONNX→xmodel converter available
 - [x] KV cache quantization script fixed and working (22 tensors quantized)
 - [x] Comprehensive concurrency benchmark completed (CPU vs NPU)
 - [x] Quality test completed
