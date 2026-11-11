@@ -1,0 +1,8 @@
+[Debug]
+xrt_log_level = error
+
+[Device]
+device=0
+
+[HwEmulation]
+mode = sw_emu
