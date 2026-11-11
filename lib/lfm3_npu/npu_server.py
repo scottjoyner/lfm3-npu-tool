@@ -222,9 +222,10 @@ def load_model():
     NEEDS_PAST_CONV = any("past_conv." in name for name in input_names)
     NEEDS_PAST_KV = any("past_key_values" in name for name in input_names)
 
-    metrics = MetricsCollector(provider="RyzenAIExecutionProvider", model="lfm3-1.7b-npu")
+    actual_provider = sess.get_providers()[0] if sess.get_providers() else "unknown"
+    metrics = MetricsCollector(provider=actual_provider, model="lfm3-1.7b-npu")
     print(f"NPU Server: Providers: {sess.get_providers()}", flush=True)
-    print(f"NPU Server: Model loaded on RyzenAI EP", flush=True)
+    print(f"NPU Server: Model loaded on {actual_provider}", flush=True)
     print(f"NPU Server: Conv layers: {CONV_LAYERS}, Attention layers: {ATTN_LAYERS}", flush=True)
     print(f"NPU Server: Needs past_conv: {NEEDS_PAST_CONV}, Needs past_key_values: {NEEDS_PAST_KV}", flush=True)
 
@@ -283,7 +284,8 @@ def _build_feed(
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "provider": "VitisAIExecutionProvider", "model": "lfm3-1.7b-npu"}
+    provider = sess.get_providers()[0] if sess else "unknown"
+    return {"status": "healthy", "provider": provider, "model": "lfm3-1.7b-npu"}
 
 
 @app.get("/v1/models")
@@ -298,14 +300,17 @@ async def list_models():
 
 @app.get("/v1/model/info")
 async def model_info():
+    provider = sess.get_providers()[0] if sess else "unknown"
+    is_npu = provider == "VitisAIExecutionProvider"
     return {
         "id": "lfm3-1.7b-npu",
-        "provider": "RyzenAIExecutionProvider",
-        "device": "AMD XDNA2 NPU",
+        "provider": provider,
+        "device": "AMD XDNA2 NPU" if is_npu else "CPU (VitisAI EP fallback)",
         "model_type": "LFM3-1.7B",
-        "conv_layers": "full (original)",
+        "conv_layers": "center-tap replacement (NPU incompatible)",
         "max_context_length": 262144,
         "vocab_size": 128000,
+        "npu_available": is_npu,
     }
 
 
