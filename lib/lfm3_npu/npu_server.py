@@ -200,15 +200,30 @@ def load_model():
 
     tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
 
-    try:
-        sess = ort.InferenceSession(
-            MODEL_PATH,
-            providers=["RyzenAIExecutionProvider"],
-        )
-        print(f"NPU Server: Successfully loaded with RyzenAI EP", flush=True)
-    except Exception as e:
-        print(f"NPU Server: RyzenAI EP failed: {type(e).__name__}: {e}", flush=True)
+    # Try NPU providers in order: RyzenAI, then VitisAI, then CPU fallback
+    sess = None
+    last_error = None
+    for provider_name in ["RyzenAIExecutionProvider", "VitisAIExecutionProvider"]:
+        try:
+            sess = ort.InferenceSession(
+                MODEL_PATH,
+                providers=[provider_name],
+            )
+            # Check if the requested provider is actually active
+            active = sess.get_providers()
+            if provider_name in active:
+                print(f"NPU Server: Successfully loaded with {provider_name}", flush=True)
+                break
+            else:
+                print(f"NPU Server: {provider_name} not active, got: {active}", flush=True)
+                sess = None
+        except Exception as e:
+            last_error = e
+            print(f"NPU Server: {provider_name} failed: {type(e).__name__}: {e}", flush=True)
+    
+    if sess is None:
         # Fall back to CPU
+        print(f"NPU Server: All NPU providers failed, last error: {last_error}", flush=True)
         sess = ort.InferenceSession(
             MODEL_PATH,
             providers=["CPUExecutionProvider"],
