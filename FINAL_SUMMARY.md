@@ -72,12 +72,24 @@ This document summarizes the complete LFM3-1.7B inference harness built for AMD 
 - `check_vitisai_support()` confirms no remaining issues after legalization
 - VitisAI EP loads the legalized model successfully but still runs on CPU (no VAIML compilation data from stub)
 
-### libvaiml2.so Investigation
-- `libvaiml2.so` (3.3MB) loads successfully (unlike `libvaiml.so` which crashes)
-- Exports only `vaiml_compile_x2_v2` — takes a JSON config string, not a file path
-- `vaiml_compile_x2_v2` segfaults when called from ctypes — requires unknown config schema
+### libvaiml2.so Fix
+- `libonnxruntime_vitisai_ep.so` requires `libvaiml2.so` which was missing from the library path
+- Copying `libvaiml2.so` from `flexml/flexml_extras/lib/` to `voe/lib/` allows VitisAI EP to link and load
+- `libvaiml2.so` loads successfully (unlike `libvaiml.so` which crashes) but only exports `vaiml_compile_x2_v2`
+- `vaiml_compile_x2_v2` takes a JSON config string and segfaults when called from ctypes — requires unknown C++ ABI or initialized state
 - `vaiml_json_result_create` is NOT in `libvaiml2.so` — only in the crashing `libvaiml.so`
-- VitisAI EP links against `libvaiml2.so` at compile time but dlopens `libvaiml.so` at runtime
+
+### xcompiler Investigation
+- `xcompiler` works with `libvaiml2.so` and accepts ONNX input files
+- Knows Strix Halo targets: `AMD_AIE2P_4x4_CMC_Overlay`, `AMD_AIE2P_4x4_Overlay`, `AMD_AIE2P_4x8_CMC_Overlay`, etc.
+- But finds 0 ops in LFM3 model (doesn't recognize GroupQueryAttention, MatMulNBits, etc.)
+- Produces `.xmodel` files (not `.xclbin`) — no xmodel→xclbin converter available in SDK
+- Simple MatMul test model also shows 0 ops — xcompiler needs a plugin to recognize ONNX ops
+
+### VAIML Compile Tool (`ryzenai_onnx_utils.vaiml`)
+- `--compile` flag generates ops JSON + `vitisai_config.json`, then tests VitisAI EP with a dummy Identity model
+- Does NOT compile the user's actual model to xclbin — only validates the VAIML pipeline
+- Real compilation happens inside VitisAI EP via `vaip-pass_vaiml_llm_custom_op` which calls `libvaiml.so` functions
 
 ### NPU Accessibility Test (`NPU_ACCESSIBILITY_TEST.py`)
 - Proves NPU hardware is accessible via pyxrt/XRT
