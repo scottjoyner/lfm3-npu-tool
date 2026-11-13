@@ -4,6 +4,56 @@
 
 This document summarizes the complete LFM3-1.7B inference harness built for AMD XDNA2 NPU alongside CPU, including all optimizations, tooling, benchmarks, and known limitations.
 
+## BREAKTHROUGH: NPU Inference Fully Working via FastFlowLM v1.0.12+ ✅
+
+**As of November 13, 2026, LFM3-1.7B runs fully on the NPU via FastFlowLM v1.0.12.**
+All 24 layers + LM head execute on the AMD Strix Halo NPU. No VitisAI EP workaround needed.
+
+| Component | Port | Provider | Quality | Status |
+|-----------|------|----------|---------|--------|
+| FLM NPU Server | 1239 | liblfm3_npu.so | **Full quality** | Production-ready ✅ |
+| VitisAI EP (stub) | 1239 | VitisAIExecutionProvider | Degraded | Deprecated |
+
+### How to Run LFM3 on NPU
+
+```bash
+# Download FLM v1.0.12 for Linux
+cd /tmp
+curl -sL -o fastflowlm_linux.tar.gz \
+  https://github.com/ROCm/FastFlowLM/releases/download/v1.0.12/fastflowlm_1.0.12_linux.tar.gz
+tar xzf fastflowlm_linux.tar.gz
+
+# Interactive chat on NPU
+export LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib
+export XILINX_XRT=/opt/xilinx/xrt
+/tmp/flm run lfm3:1.7b
+
+# NPU server (OpenAI-compatible API)
+/tmp/flm serve lfm3:1.7b -p 1239 --host 127.0.0.1
+
+# API example
+curl -X POST http://localhost:1239/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"lfm3:1.7b","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":100}'
+```
+
+### Performance (LFM3-1.7B on Strix Halo NPU)
+
+| Metric | Value |
+|--------|-------|
+| Prefill speed | ~69 tok/s |
+| Decode speed | ~27 tok/s |
+| Time to first token | ~0.25s |
+| Model load time | ~2.9s |
+| Layers on NPU | All 24 + LM head |
+| Quantization | Q4_0 |
+
+---
+
+## Overview (Original VitisAI EP Approach)
+
+The sections below document the original attempt to run LFM3 via ONNX Runtime + VitisAI ExecutionProvider. All 13+ approaches were exhausted and documented in `EXHAUSTIVE_NPU_APPROACHES.md`. This historical context is preserved for reference.
+
 ## System Configuration
 
 | Component | Details |

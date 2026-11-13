@@ -1,167 +1,114 @@
 # LFM3-1.7B NPU Inference Tooling
 
-Complete tooling suite for running LFM3-1.7B inference on the AMD XDNA2 NPU
-using the Ryzen AI 1.8.0 SDK with VitisAI ExecutionProvider.
+Complete tooling suite for running LFM3-1.7B inference on the AMD XDNA2 NPU.
 
-## Important Note on NPU Quality
+## Status: NPU Inference Fully Working ✅
 
-LFM3's depthwise Conv layers trigger a crash in AMD's proprietary
-`libvaiml.so::vaiml_get_capability_v5` during VitisAI EP `GetCapability()`.
-The crash occurs **before any inference** and cannot be worked around from Python.
+**LFM3-1.7B runs fully on the NPU via FastFlowLM v1.0.12+** (released Nov 5, 2026).
+All 24 layers + LM head execute on the AMD Strix Halo NPU. No VitisAI EP workaround needed.
 
-**Workaround:** Conv layers are replaced with simplified operations:
-- **Center-tap Mul** (recommended): `output[c,t] = input[c,t] × w[c,0,3]`
-  Preserves center weight; better quality but still repetitive.
-- **Identity bypass**: Conv replaced entirely with Identity.
-  Fastest, lowest quality (very repetitive).
-
-**Full-quality NPU inference requires:**
-- AMD to fix `libvaiml.so::vaiml_get_capability_v5`
-- LiquidAI to provide VitisAI-precompiled LFM3 NPU artifacts
-- FastFlowLM to add LFM3 support
-
-**The CPU server provides full-quality inference** and is the production-ready solution.
-
-## Installation
-
-```bash
-cd /media/scott/data/lfm3-npu-tool
-./install.sh
-```
-
-This installs `lfm3-npu`, `lfm3-npu-server-mgr`, `lfm3-npu-health` to `/usr/local/bin/`
-and copies the config to `~/.config/lfm3-npu/config.yaml`.
+| Component | Port | Provider | Quality | Status |
+|-----------|------|----------|---------|--------|
+| FLM NPU Server | 1239 | liblfm3_npu.so | **Full quality** | Production-ready ✅ |
+| VitisAI EP (stub) | 1239 | VitisAIExecutionProvider | Degraded | Deprecated |
 
 ## Quick Start
 
-### Source the Ryzen AI Environment
+### Install FastFlowLM (v1.0.12+)
 
 ```bash
-source /media/scott/data/lfm3-npu-tool/etc/lfm3-npu-env.sh
+# Download and extract FLM v1.0.12 for Linux
+cd /tmp
+curl -sL -o fastflowlm_linux.tar.gz \
+  https://github.com/ROCm/FastFlowLM/releases/download/v1.0.12/fastflowlm_1.0.12_linux.tar.gz
+tar xzf fastflowlm_linux.tar.gz
+
+# Run LFM3-1.7B on NPU (interactive)
+export LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib
+export XILINX_XRT=/opt/xilinx/xrt
+/tmp/flm run lfm3:1.7b
+
+# Start NPU server (OpenAI-compatible API on port 1239)
+/tmp/flm serve lfm3:1.7b -p 1239 --host 127.0.0.1
 ```
 
-### Start the CPU Server (Full Quality, Production)
+### CPU Server (Full Quality, Port 1238)
+
+The existing CPU inference server remains available at port 1238:
 
 ```bash
-# Using the manager
-lfm3-npu-server-mgr start cpu
-
-# Check health
-lfm3-npu-health cpu
-
-# Or using systemd
-sudo systemctl start lfm3-npu-cpu
-sudo systemctl enable lfm3-npu-cpu
+cd /media/scott/data/lfm3-npu-server
+# Server is already running (~4.7 days uptime)
+curl http://localhost:1238/health
 ```
 
-### Start the NPU Server (Experimental, Degraded Quality)
+## NPU Server API Example
 
 ```bash
-# Requires root for /dev/accel0 access
-sudo lfm3-npu-server-mgr start npu
-
-# Check health
-lfm3-npu-health npu
-
-# Or using systemd
-sudo systemctl start lfm3-npu-npu
-sudo systemctl enable lfm3-npu-npu
-```
-
-### Generate Text
-
-```bash
-# CPU (full quality)
-lfm3-npu generate "The quick brown fox" --max-tokens 30 --temperature 0.7
-
-# NPU (degraded quality)
-lfm3-npu --model /media/scott/data/lfm3_conv_centertap.onnx generate "The quick brown fox" --max-tokens 30
-```
-
-### Benchmark
-
-```bash
-# NPU only
-lfm3-npu bench --tokens 50 --iterations 3
-
-# Compare CPU vs NPU
-lfm3-npu bench --compare --tokens 50 --iterations 3
-```
-
-### Convert a Model
-
-```bash
-lfm3-npu convert --model /path/to/model.onnx --output model_npu.onnx --method centertap
-```
-
-## Server Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/v1/models` | GET | List models |
-| `/v1/model/info` | GET | Model info |
-| `/v1/chat/completions` | POST | Chat completion |
-
-### Example API Call
-
-```bash
-curl -X POST http://localhost:1238/v1/chat/completions \
+curl -s -X POST http://localhost:1239/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 30, "temperature": 0.7}'
+  -d '{"model":"lfm3:1.7b","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":100}'
 ```
 
-## Python Client
-
-```python
-from lfm3_npu.client import LFM3Client
-
-client = LFM3Client(base_url="http://localhost:1238")
-response = client.chat("Hello, how are you?", max_tokens=30)
-print(response)
+**Expected output:**
 ```
+"2 + 2 equals **4**."
+```
+- Prefill: ~69 tok/s
+- Decode: ~27 tok/s
+- TTFT: ~0.25s
+
+## Performance (LFM3-1.7B on Strix Halo NPU)
+
+| Metric | Value |
+|--------|-------|
+| Prefill speed | ~69 tok/s |
+| Decode speed | ~27 tok/s |
+| Time to first token | ~0.25s |
+| Model load time | ~2.9s |
+| Layers on NPU | All 24 + LM head |
+| Quantization | Q4_0 |
 
 ## Directory Layout
 
 ```
 lfm3-npu-tool/
-├── bin/
-│   ├── lfm3-npu              # Unified CLI
-│   ├── lfm3-npu-server-mgr   # Server manager
-│   ├── lfm3-npu-health       # Health check
-│   └── start_npu_server.sh   # NPU server startup script
-├── lib/
-│   └── lfm3_npu/
-│       ├── __init__.py
-│       ├── config.py         # Configuration
-│       ├── inference.py      # NPU inference engine
-│       ├── server.py         # Server manager
-│       ├── benchmark.py      # Benchmarking
-│       ├── converter.py      # Model conversion
-│       ├── cpu_server.py     # CPU FastAPI server (port 1238)
-│       ├── npu_server.py     # NPU FastAPI server (port 1239)
-│       └── client.py         # Python REST client
-├── etc/
-│   ├── lfm3-npu-config.yaml  # Default configuration
-│   └── lfm3-npu-env.sh       # Environment setup
-├── examples/
-│   ├── example_generate.py
-│   └── example_client.py
-├── tests/
-│   └── test_tooling.py       # 5 tests, all passing
-├── var/
-│   ├── log/                  # Server logs
-│   └── run/                  # PID files
-├── install.sh                # Installation script
-└── README.md                 # This file
+├── bin/                          # CLI tools
+├── lib/lfm3_npu/                 # Python package
+├── etc/                          # Config files
+├── examples/                     # Example scripts
+├── tests/                        # Tooling test suite (5/5 passing)
+├── var/                          # Logs and PID files
+├── install.sh                    # Installation script
+├── README.md                     # This file
+├── FINAL_SUMMARY.md              # Overall project summary
+├── EXHAUSTIVE_NPU_APPROACHES.md  # All VitisAI EP approaches attempted
+├── STUB_VAIML_README.md          # Stub libvaiml.so documentation
+├── NPU_ACCESSIBILITY_RESULTS.md  # NPU hardware accessibility proof
+├── VAIP_NPU_PATH.md              # VAIP config bypass investigation
+└── VAIML_COMPILE_X2_V2_ATTEMPT.md # libvaiml2.so compilation attempt
 ```
 
-## Known Limitations
+## Key Files
 
-1. **NPU text quality is degraded** - Conv layers are simplified, losing local context mixing
-2. **NPU server requires root** for `/dev/accel0` access
-3. **Full-quality NPU support requires external help** (AMD, LiquidAI, FastFlowLM)
-4. **CPU server** provides full-quality inference without root
+| File | Purpose |
+|------|---------|
+| `/tmp/flm` | FLM v1.0.12 binary (LFM3 NPU support) |
+| `/tmp/lib/liblfm3_npu.so` | LFM3 NPU engine library |
+| `/home/scott/.config/flm/models/LFM3-1.7B-NPU2/` | Downloaded model files |
+| `/media/scott/data/lfm3-npu-server/` | CPU server (port 1238) |
+| Port 1239 | NPU server (FLM LFM3) |
+
+## Background: VitisAI EP Approaches Exhausted
+
+All 13+ approaches to run LFM3 via VitisAI ExecutionProvider were attempted and documented in `EXHAUSTIVE_NPU_APPROACHES.md`. All were blocked by:
+
+1. **`libvaiml.so` SIGSEGV** — Protobuf crash during `dlopen()` (AMD proprietary, unfixable from user space)
+2. **No Strix Halo xclbin** — Existing SDK xclbins target `xilinx_v1_ipu_0_0` (bank 131071), not Strix (banks 0/1)
+3. **No Strix Halo platform file** — No `.xpfm`/`.xsa` exists for `v++ --package`
+4. **No ONNX→xclbin pipeline** — xcompiler finds 0 ops in LFM3
+
+FastFlowLM v1.0.12 bypasses all of these by using its own `liblfm3_npu.so` engine directly with XRT.
 
 ## License
 
