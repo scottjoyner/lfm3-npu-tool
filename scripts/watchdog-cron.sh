@@ -10,6 +10,7 @@ set -uo pipefail
 TOOL_DIR="/media/scott/data/lfm3-npu-tool"
 LOG_FILE="${TOOL_DIR}/var/log/watchdog-cron.log"
 MAX_UPTIME_HOURS="${LFM3_WATCHDOG_MAX_UPTIME_HOURS:-24}"
+MAX_GARBLE_RATIO="${LFM3_WATCHDOG_MAX_GARBLE_RATIO:-0.3}"
 
 mkdir -p "${TOOL_DIR}/var/log"
 
@@ -30,7 +31,7 @@ export FLM_MODEL_PATH="${FLM_MODEL_PATH:-/home/scott/.config/flm/models}"
 export TMPDIR="${TMPDIR:-/media/scott/data/tmp}"
 
 # Run watchdog once
-python3 "${TOOL_DIR}/bin/lfm3-npu" watchdog --once --max-uptime-hours "${MAX_UPTIME_HOURS}" 2>&1 | tee -a "${LOG_FILE}"
+python3 "${TOOL_DIR}/bin/lfm3-npu" watchdog --once --max-uptime-hours "${MAX_UPTIME_HOURS}" --max-garble-ratio "${MAX_GARBLE_RATIO}" 2>&1 | tee -a "${LOG_FILE}"
 
 EXIT_CODE=${PIPESTATUS[0]}
 log "=== Watchdog cron run complete (exit code: ${EXIT_CODE}) ==="

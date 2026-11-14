@@ -742,6 +742,7 @@ def cmd_watchdog(args) -> int:
         max_error_rate=args.max_error_rate,
         max_latency_ms=args.max_latency_ms,
         max_uptime_hours=args.max_uptime_hours,
+        max_garble_ratio=args.max_garble_ratio,
         webhook_url=args.webhook,
         cooldown_seconds=args.cooldown,
         enable_degradation=args.degrade,
@@ -879,6 +880,8 @@ def main() -> int:
                                  help="Minimum concurrent requests when degrading")
     watchdog_parser.add_argument("--max-uptime-hours", type=float, default=None,
                                  help="Max uptime in hours before auto-restart (prevents CPU quality degradation)")
+    watchdog_parser.add_argument("--max-garble-ratio", type=float, default=None,
+                                 help="Max garble score (0.0-1.0) before auto-restart (detects output quality degradation)")
     watchdog_parser.add_argument("--status", action="store_true",
                                  help="Show detailed status and exit")
     watchdog_parser.set_defaults(func=cmd_watchdog)

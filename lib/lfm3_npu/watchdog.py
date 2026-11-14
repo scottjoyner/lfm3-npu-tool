@@ -8,6 +8,7 @@ webhook notifications, cooldown periods, and graceful degradation.
 """
 
 import json
+import re
 import sys
 import subprocess
 import time
@@ -31,6 +32,7 @@ class Watchdog:
         max_error_rate: Optional[float] = None,
         max_latency_ms: Optional[float] = None,
         max_uptime_hours: Optional[float] = None,
+        max_garble_ratio: Optional[float] = None,
         webhook_url: Optional[str] = None,
         cooldown_seconds: int = 300,
         enable_degradation: bool = False,
@@ -43,6 +45,7 @@ class Watchdog:
         self.max_error_rate = max_error_rate
         self.max_latency_ms = max_latency_ms
         self.max_uptime_hours = max_uptime_hours
+        self.max_garble_ratio = max_garble_ratio
         self.webhook_url = webhook_url
         self.cooldown_seconds = cooldown_seconds
         self.enable_degradation = enable_degradation
@@ -161,8 +164,28 @@ class Watchdog:
 
         Returns True if action was taken (restarted), False otherwise.
         """
-        # First check HTTP health — if responding, server is fine regardless of PID tracking
-        if self.check_health(server):
+    def check_and_restart(self, server: str) -> bool:
+        """Check server health and restart if unresponsive or underperforming.
+
+        Returns True if action was taken (restarted), False otherwise.
+        """
+        # Determine host/port for this server
+        if server == "cpu":
+            check_port = self.config.get("server.cpu.port", 1238)
+            check_host = self.config.get("server.cpu.host", "0.0.0.0")
+        elif server == "npu":
+            check_port = self.config.get("server.npu.port", 1239)
+            check_host = self.config.get("server.npu.host", "0.0.0.0")
+        else:
+            return False
+
+        # First check HTTP health — if responding, server is fine
+        try:
+            healthy = self.check_health(server)
+        except Exception:
+            healthy = False
+
+        if healthy:
             self._consecutive_failures[server] = 0
 
             # Check max uptime — restart CPU server periodically to prevent
@@ -170,15 +193,8 @@ class Watchdog:
             if self.max_uptime_hours is not None and server == "cpu":
                 try:
                     import json
-                    # Determine host/port for this server
-                    if server == "cpu":
-                        uptime_port = self.config.get("server.cpu.port", 1238)
-                        uptime_host = self.config.get("server.cpu.host", "0.0.0.0")
-                    else:
-                        uptime_port = self.config.get("server.npu.port", 1239)
-                        uptime_host = self.config.get("server.npu.host", "0.0.0.0")
                     req = urllib.request.urlopen(
-                        f"http://{uptime_host}:{uptime_port}/health", timeout=5
+                        f"http://{check_host}:{check_port}/health", timeout=5
                     )
                     health_data = json.loads(req.read().decode("utf-8"))
                     uptime_seconds = health_data.get("uptime_seconds", 0)
@@ -195,6 +211,23 @@ class Watchdog:
                         return self.manager.restart(server)
                 except Exception:
                     pass  # Can't read uptime, skip uptime check
+
+            # Quality degradation check — send a test prompt and check for garbled output
+            if self.max_garble_ratio is not None and server == "cpu":
+                try:
+                    garble_score = self._check_output_quality(server)
+                    if garble_score > self.max_garble_ratio:
+                        print(
+                            f"Watchdog: {server.upper()} output quality degraded "
+                            f"(garble score {garble_score:.2f} > {self.max_garble_ratio}), "
+                            f"restarting...",
+                            flush=True,
+                        )
+                        self._alert(server, f"output quality degraded (garble score {garble_score:.2f})", "warning")
+                        self._record_restart(server)
+                        return self.manager.restart(server)
+                except Exception:
+                    pass  # Can't check quality, skip
 
             return False
 
@@ -257,7 +290,7 @@ class Watchdog:
                     try:
                         import json
                         req = urllib.request.urlopen(
-                            f"http://{host}:{port}/v1/metrics/detailed", timeout=5
+                            f"http://{check_host}:{check_port}/v1/metrics/detailed", timeout=5
                         )
                         detailed = json.loads(req.read().decode("utf-8"))
                         completed = detailed.get("completed", {})
@@ -309,6 +342,85 @@ class Watchdog:
         except Exception as e:
             print(f"Watchdog: degradation failed for {server}: {e}", flush=True)
             return False
+
+    def _check_output_quality(self, server: str) -> float:
+        """Send a test prompt and check output quality.
+
+        Returns a garble score from 0.0 (clean) to 1.0 (completely garbled).
+        Higher scores indicate more degradation.
+        """
+        import json as _json
+
+        if server == "cpu":
+            port = self.config.get("server.cpu.port", 1238)
+            host = self.config.get("server.cpu.host", "0.0.0.0")
+            payload = {
+                "messages": [{"role": "user", "content": "What is 2+2?"}],
+                "max_tokens": 20,
+                "temperature": 0.7,
+            }
+        elif server == "npu":
+            port = self.config.get("server.npu.port", 1239)
+            host = self.config.get("server.npu.host", "127.0.0.1")
+            payload = {
+                "model": "lfm3:1.7b",
+                "messages": [{"role": "user", "content": "What is 2+2?"}],
+                "max_tokens": 20,
+                "temperature": 0.7,
+            }
+        else:
+            return 0.0
+
+        try:
+            data = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://{host}:{port}/v1/chat/completions",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = _json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return 1.0  # Can't reach server, assume worst
+
+        choice = result.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        content = msg.get("content", "") or ""
+        reasoning = msg.get("reasoning_content", "") or ""
+        full_text = content + " " + reasoning
+
+        if not full_text:
+            return 1.0  # Empty output is bad
+
+        garble_score = 0.0
+
+        # Check for conversation loop markers
+        loop_markers = ["assistant:", "user:", "system:"]
+        loop_count = sum(full_text.lower().count(m.lower()) for m in loop_markers)
+        if loop_count > 2:
+            garble_score += 0.4
+
+        # Check for numbered list explosion
+        if re.search(r'\d+\.\s*\d+\.\s*\d+', full_text):
+            garble_score += 0.2
+
+        # Check for repeated single characters
+        if re.search(r'(.)\1{5,}', full_text):
+            garble_score += 0.2
+
+        # Check for wrong math patterns
+        if re.search(r'(?i)(?:answer|is|equals?):\s*[5-9]', full_text):
+            garble_score += 0.2
+
+        # Check vocabulary diversity
+        words = full_text.split()
+        if len(words) > 3:
+            vocab_diversity = len(set(words)) / len(words)
+            if vocab_diversity < 0.5:
+                garble_score += 0.2
+
+        return min(1.0, garble_score)
 
     def run_forever(self, servers: Optional[List[str]] = None) -> None:
         """Run the watchdog loop forever.
@@ -428,6 +540,8 @@ def watchdog_main() -> int:
                          help="Minimum concurrent requests when degrading")
     parser.add_argument("--max-uptime-hours", type=float, default=None,
                          help="Max uptime in hours before auto-restart (prevents CPU quality degradation)")
+    parser.add_argument("--max-garble-ratio", type=float, default=None,
+                         help="Max garble score (0.0-1.0) before auto-restart (detects output quality degradation)")
     parser.add_argument("--status", action="store_true",
                          help="Show detailed status and exit")
 
@@ -442,6 +556,7 @@ def watchdog_main() -> int:
         max_error_rate=args.max_error_rate,
         max_latency_ms=args.max_latency_ms,
         max_uptime_hours=args.max_uptime_hours,
+        max_garble_ratio=args.max_garble_ratio,
         webhook_url=args.webhook,
         cooldown_seconds=args.cooldown,
         enable_degradation=args.degrade,
