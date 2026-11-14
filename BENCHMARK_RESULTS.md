@@ -56,6 +56,22 @@
 
 All 5 completed but with degraded quality (repetitive, garbled, conversation loops).
 
+## Concurrency Stress Test (16 requests, concurrency 4)
+
+| Metric | CPU | NPU | Improvement |
+|--------|-----|-----|-------------|
+| Success rate | 16/16 | 16/16 | Equal |
+| Throughput | 0.2 req/s | 0.4 req/s | **2x** |
+| TTFT (avg) | N/A | 0.207s | — |
+| Decode speed | N/A | 28.1 tok/s | — |
+| Total/req (avg) | 20.18s | 8.51s | **2.4x faster** |
+| Max total/req | 20.57s | 9.86s | — |
+| Garbled output | 0 | 0 | Equal |
+
+**NPU Stress:** All 16 concurrent requests completed successfully at 28.1 tok/s decode, 0.207s avg TTFT, 2x throughput vs CPU.
+
+**CPU Stress:** All 16 concurrent requests completed but at 20.18s avg per request, 0.2 req/s throughput.
+
 ## Quality Comparison
 
 | Metric | CPU (ONNX) | NPU (FLM) |

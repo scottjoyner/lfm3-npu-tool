@@ -210,6 +210,18 @@ The AMD `libvaiml.so` crashes with SIGSEGV in protobuf descriptor registration d
 | TTFT | N/A | ~0.18s | — |
 | Output quality | Garbled, repetitive | Clean, reasoned | NPU superior |
 
+### Concurrency Stress Test Results (16 requests, concurrency 4)
+
+| Metric | CPU | NPU | Improvement |
+|--------|-----|-----|-------------|
+| Success rate | 16/16 | 16/16 | Equal |
+| Throughput | 0.2 req/s | 0.4 req/s | **2x** |
+| TTFT (avg) | N/A | 0.207s | — |
+| Decode speed | N/A | 28.1 tok/s | — |
+| Total/req (avg) | 20.18s | 8.51s | **2.4x faster** |
+| Max total/req | 20.57s | 9.86s | — |
+| Garbled output | 0 | 0 | Equal |
+
 
 ## Bottom Line
 
