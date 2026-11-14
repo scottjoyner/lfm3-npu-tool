@@ -1,0 +1,8 @@
+[Unit]
+Description=LFM3-1.7B Health Check Service - Run unified health check
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/health_check.py --server both --exit-on-unhealthy
+Environment=TMPDIR=/media/scott/data/tmp
+Environment=PATH=/usr/bin:/bin

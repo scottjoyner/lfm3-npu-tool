@@ -84,7 +84,7 @@ done
 # Install scripts
 echo ""
 echo "[5/8] Installing scripts..."
-for script in watchdog-cron.sh quality_benchmark.py concurrency_stress.py; do
+for script in watchdog-cron.sh quality_benchmark.py concurrency_stress.py npu_metrics_exporter.py health_check.py; do
     if [ -f "${TOOLING_DIR}/scripts/$script" ]; then
         cp "${TOOLING_DIR}/scripts/$script" "${TOOLING_DIR}/scripts/$script"
         chmod +x "${TOOLING_DIR}/scripts/$script"
@@ -104,7 +104,8 @@ echo ""
 echo "[6/8] Installing user systemd services..."
 for svc in lfm3-npu-cpu.service lfm3-npu-npu.service lfm3-npu-metrics.service \
            lfm3-npu-watchdog.service lfm3-npu-watchdog.timer \
-           lfm3-npu-doctor.service lfm3-npu-doctor.timer; do
+           lfm3-npu-doctor.service lfm3-npu-doctor.timer \
+           lfm3-npu-health.service lfm3-npu-health.timer; do
     if [ -f "${TOOLING_DIR}/etc/$svc" ]; then
         cp "${TOOLING_DIR}/etc/$svc" "${HOME}/.config/systemd/user/$svc"
         echo "  Installed: ${HOME}/.config/systemd/user/$svc"
@@ -190,6 +191,7 @@ echo ""
 echo "  # Enable systemd timers (auto-start on boot)"
 echo "  systemctl --user enable --now lfm3-npu-watchdog.timer   # Watchdog every 5 min"
 echo "  systemctl --user enable --now lfm3-npu-doctor.timer      # Doctor hourly"
+echo "  systemctl --user enable --now lfm3-npu-health.timer      # Health check every minute"
 echo ""
 echo "  # Run watchdog (auto-restart CPU if uptime > 24h)"
 echo "  lfm3-npu watchdog --once --max-uptime-hours 24"
