@@ -9,19 +9,20 @@ Commands:
     generate        Generate text via HTTP API (cpu or npu server)
     server          Start/stop/restart/check inference server
     bench           Benchmark inference performance via HTTP API
-    bench-batch     Benchmark concurrent inference performance
+    perf            Benchmark concurrent inference performance
     health          Check server health
     convert         Convert model to NPU-compatible format
     config          Show current configuration
     status          Show overall system status
     compare         Compare CPU vs NPU inference (side-by-side)
     compare-servers Compare CPU vs NPU via HTTP API (live servers)
+    doctor          Diagnose system health (servers, NPU, env, disk)
     watchdog        Run server watchdog (auto-restart unresponsive servers)
     fleet-monitor   Fleet monitoring across servers
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
-    lfm3-npu generate "What is 2+2?" --server cpu --max-tokes 30
+    lfm3-npu generate "What is 2+2?" --server cpu --max-tokens 30
     lfm3-npu server start npu          # Start FLM NPU server (port 1239)
     lfm3-npu server start cpu          # Start CPU server (port 1238)
     lfm3-npu server status             # Check both servers with health
@@ -29,6 +30,7 @@ Examples:
     lfm3-npu bench --server both --prompt "Hello" --tokens 50
     lfm3-npu health --server npu
     lfm3-npu compare-servers --prompts "What is 2+2?" "The capital of France is"
+    lfm3-npu doctor                    # Run full system diagnosis
     lfm3-npu watchdog --once
     lfm3-npu watchdog --daemon --interval 30
 """
@@ -112,9 +114,18 @@ def generate_via_http(server, prompt, max_tokens=50, temperature=0.7, top_p=0.9)
     result = http_post(url, payload)
     choice = result["choices"][0]
     msg = choice["message"]
+    content = msg.get("content", "")
+    reasoning = msg.get("reasoning_content", "")
+    # NPU server (FastFlowLM) puts responses in reasoning_content;
+    # fall back to content if reasoning is empty.
+    used_reasoning_fallback = False
+    if not content and reasoning:
+        content = reasoning
+        used_reasoning_fallback = True
     return {
-        "content": msg.get("content", ""),
-        "reasoning": msg.get("reasoning_content", ""),
+        "content": content,
+        "reasoning": reasoning,
+        "used_reasoning_fallback": used_reasoning_fallback,
         "usage": result.get("usage", {}),
         "finish_reason": choice.get("finish_reason", ""),
     }
@@ -215,8 +226,8 @@ def cmd_generate(args) -> int:
                 top_p=args.top_p,
             )
             print(f"Prompt: '{args.prompt}'", flush=True)
-            if result["reasoning"]:
-                print(f"Reasoning: {result['reasoning'][:120]}...", flush=True)
+            if result["reasoning"] and not result["used_reasoning_fallback"]:
+                print(f"Reasoning: {result['reasoning']}", flush=True)
             print(f"Content: {result['content']}", flush=True)
             usage = result.get("usage", {})
             if usage:
@@ -589,6 +600,125 @@ def cmd_compare_servers(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """Diagnose system health: servers, NPU hardware, environment, configs."""
+    import subprocess
+    import shutil
+
+    issues = []
+    checks = []
+
+    def check(name, ok, detail=""):
+        status = "PASS" if ok else "FAIL"
+        checks.append((name, status, detail))
+        if not ok:
+            issues.append(f"{name}: {detail}")
+
+    # 1. NPU hardware
+    print("=== LFM3-1.7B Doctor: System Diagnosis ===\n")
+
+    check("xrt-smi available", shutil.which("xrt-smi") is not None,
+          "xrt-smi not found in PATH")
+    try:
+        result = subprocess.run(
+            ["xrt-smi", "examine"], capture_output=True, text=True, timeout=10
+        )
+        npu_found = "Strix Halo" in result.stdout or "aie2p" in result.stdout
+        check("NPU hardware detected", npu_found,
+              "No Strix Halo NPU found in xrt-smi output")
+    except Exception as e:
+        check("NPU hardware detected", False, f"xrt-smi failed: {e}")
+
+    # 2. FLM binary
+    flm_binary = "/tmp/flm"
+    check("FLM binary exists", os.path.exists(flm_binary),
+          f"{flm_binary} not found")
+    check("FLM binary executable", os.access(flm_binary, os.X_OK) if os.path.exists(flm_binary) else False,
+          f"{flm_binary} not executable")
+
+    # 3. FLM NPU engine
+    npu_engine = "/tmp/lib/liblfm3_npu.so"
+    check("FLM NPU engine exists", os.path.exists(npu_engine),
+          f"{npu_engine} not found")
+
+    # 4. Model files
+    model_dir = "/home/scott/.config/flm/models/LFM3-1.7B-NPU2"
+    model_files = ["config.json", "model.q4nx", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"]
+    all_model_files = all(os.path.exists(os.path.join(model_dir, f)) for f in model_files) if os.path.isdir(model_dir) else False
+    check("FLM model files present", all_model_files,
+          f"Missing model files in {model_dir}")
+
+    # 5. CPU server model
+    cpu_model = "/media/scott/data/lfm3_oga_export/model.onnx"
+    check("CPU ONNX model exists", os.path.exists(cpu_model),
+          f"{cpu_model} not found")
+
+    # 6. Environment variables
+    check("XILINX_XRT set", bool(os.environ.get("XILINX_XRT")),
+          "XILINX_XRT not set (needed for FLM)")
+    check("LD_LIBRARY_PATH has /tmp/lib", "/tmp/lib" in os.environ.get("LD_LIBRARY_PATH", ""),
+          "/tmp/lib not in LD_LIBRARY_PATH (needed for liblfm3_npu.so)")
+
+    # 7. Server health
+    manager = ServerManager(load_config())
+    for sname, host, port, path in [
+        ("cpu", CPU_HOST, CPU_PORT, "/health"),
+        ("npu", NPU_HOST, NPU_PORT, "/v1/models"),
+    ]:
+        try:
+            http_get(f"http://{host}:{port}{path}", timeout=5)
+            check(f"{sname.upper()} server reachable", True)
+        except Exception as e:
+            check(f"{sname.upper()} server reachable", False, f"Not reachable on {host}:{port} ({e})")
+
+    # 8. Disk space
+    try:
+        stat = shutil.disk_usage("/media/scott/data")
+        free_gb = stat.free / (1024**3)
+        check("Disk space > 5GB", free_gb > 5,
+              f"Only {free_gb:.1f}GB free on /media/scott/data")
+    except Exception as e:
+        check("Disk space check", False, str(e))
+
+    # 9. /tmp space (FLM may write temp files)
+    try:
+        stat = shutil.disk_usage("/tmp")
+        free_gb = stat.free / (1024**3)
+        check("/tmp space > 2GB", free_gb > 2,
+              f"Only {free_gb:.1f}GB free on /tmp")
+    except Exception as e:
+        check("/tmp space check", False, str(e))
+
+    # Print results
+    for name, status, detail in checks:
+        mark = "✓" if status == "PASS" else "✗"
+        detail_str = f" — {detail}" if status == "FAIL" and detail else ""
+        print(f"  [{mark}] {name}{detail_str}")
+
+    print(f"\n{'=' * 50}")
+    if issues:
+        print(f"DOCTOR: {len(issues)} issue(s) found")
+        for i, issue in enumerate(issues, 1):
+            print(f"  {i}. {issue}")
+        print("\nRecommended actions:")
+        if any("FLM binary" in i for i in issues):
+            print("  - Download FLM v1.0.12 from https://github.com/ROCm/FastFlowLM/releases/tag/v1.0.12")
+            print("    Extract to /tmp/ and ensure /tmp/flm is executable")
+        if any("NPU engine" in i for i in issues):
+            print("  - Extract liblfm3_npu.so from FLM release to /tmp/lib/")
+        if any("server reachable" in i for i in issues):
+            print("  - Start servers: lfm3-npu server start cpu  lfm3-npu server start npu")
+        if any("Disk space" in i or "/tmp space" in i for i in issues):
+            print("  - Free disk space; use /media/scott/data for large files")
+        if any("LD_LIBRARY_PATH" in i for i in issues):
+            print("  - Export LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib:$LD_LIBRARY_PATH")
+            print("    (Only needed when starting NPU server manually)")
+        return 1
+    else:
+        print("DOCTOR: All checks passed. System is healthy.")
+        return 0
+
+
 def cmd_watchdog(args) -> int:
     """Run the server watchdog."""
     from lfm3_npu.watchdog import Watchdog
@@ -599,6 +729,7 @@ def cmd_watchdog(args) -> int:
         min_tps=args.min_tps,
         max_error_rate=args.max_error_rate,
         max_latency_ms=args.max_latency_ms,
+        max_uptime_hours=args.max_uptime_hours,
         webhook_url=args.webhook,
         cooldown_seconds=args.cooldown,
         enable_degradation=args.degrade,
@@ -709,6 +840,10 @@ def main() -> int:
     compare_srv_parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling threshold")
     compare_srv_parser.set_defaults(func=cmd_compare_servers)
 
+    # doctor
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose system health (servers, NPU, env, disk)")
+    doctor_parser.set_defaults(func=cmd_doctor)
+
     # watchdog
     watchdog_parser = subparsers.add_parser("watchdog", help="Run server watchdog")
     watchdog_parser.add_argument("--servers", nargs="+", default=["cpu", "npu"],
@@ -730,6 +865,8 @@ def main() -> int:
                                  help="Enable graceful degradation (reduce concurrency before restart)")
     watchdog_parser.add_argument("--min-concurrent", type=int, default=1,
                                  help="Minimum concurrent requests when degrading")
+    watchdog_parser.add_argument("--max-uptime-hours", type=float, default=None,
+                                 help="Max uptime in hours before auto-restart (prevents CPU quality degradation)")
     watchdog_parser.add_argument("--status", action="store_true",
                                  help="Show detailed status and exit")
     watchdog_parser.set_defaults(func=cmd_watchdog)

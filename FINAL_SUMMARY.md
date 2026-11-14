@@ -57,6 +57,9 @@ lfm3-npu compare-servers --prompts "What is 2+2?" "The capital of France is"
 # Watchdog (auto-restart unresponsive servers)
 lfm3-npu watchdog --once
 lfm3-npu watchdog --daemon --interval 30
+lfm3-npu watchdog --once --max-uptime-hours 24   # Prevent CPU quality degradation
+# Doctor (system diagnosis)
+lfm3-npu doctor
 
 # Systemd services (requires sudo)
 # etc/lfm3-npu-cpu.service  -> port 1238
@@ -126,7 +129,7 @@ FastFlowLM v1.0.12 bypasses all of these by using its own `liblfm3_npu.so` engin
 
 ## Complete Tooling Suite (`/media/scott/data/lfm3-npu-tool/`)
 
-- **CLI** (`bin/lfm3-npu`): 12 commands — generate, server, bench, perf, health, convert, config, status, compare, compare-servers, watchdog, fleet-monitor
+- **CLI** (`bin/lfm3-npu`): 13 commands — generate, server, bench, perf, health, convert, config, status, compare, compare-servers, doctor, watchdog, fleet-monitor
 - **Python package** (`lib/lfm3_npu/`): ServerManager, Watchdog, benchmark, converter, compare, config, metrics
 - **Config** (`etc/lfm3-npu-config.yaml`): with performance tuning section
 - **Env setup** (`etc/lfm3-npu-env.sh`)
@@ -141,7 +144,19 @@ FastFlowLM v1.0.12 bypasses all of these by using its own `liblfm3_npu.so` engin
 
 ### 1. CPU Server Quality Degradation After Extended Uptime
 
-The CPU server (ONNX Runtime) shows output quality degradation after extended uptime (repetitive output, conversation loops, garbled text). Restarting the server fixes the issue. The NPU server (FastFlowLM) maintains consistent quality over extended uptime.
+The CPU server (ONNX Runtime) shows output quality degradation after extended uptime (repetitive output, conversation loops, garbled text). The watchdog now supports `--max-uptime-hours` to auto-restart the CPU server before quality degrades:
+
+```bash
+# Restart CPU server if it's been running more than 24 hours
+lfm3-npu watchdog --once --max-uptime-hours 24
+
+# Run watchdog as daemon with 24h max uptime
+lfm3-npu watchdog --daemon --interval 300 --max-uptime-hours 24
+```
+
+**Recommendation**: Set up a cron job or systemd timer to run `lfm3-npu watchdog --once --max-uptime-hours 24` daily.
+
+The NPU server (FastFlowLM) maintains consistent quality over extended uptime and does not need periodic restarts.
 
 ### 2. VitisAI EP Cannot Run Full-Quality LFM3
 

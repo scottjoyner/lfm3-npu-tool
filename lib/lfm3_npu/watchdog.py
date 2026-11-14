@@ -30,6 +30,7 @@ class Watchdog:
         min_tps: Optional[float] = None,
         max_error_rate: Optional[float] = None,
         max_latency_ms: Optional[float] = None,
+        max_uptime_hours: Optional[float] = None,
         webhook_url: Optional[str] = None,
         cooldown_seconds: int = 300,
         enable_degradation: bool = False,
@@ -41,6 +42,7 @@ class Watchdog:
         self.min_tps = min_tps
         self.max_error_rate = max_error_rate
         self.max_latency_ms = max_latency_ms
+        self.max_uptime_hours = max_uptime_hours
         self.webhook_url = webhook_url
         self.cooldown_seconds = cooldown_seconds
         self.enable_degradation = enable_degradation
@@ -162,6 +164,38 @@ class Watchdog:
         # First check HTTP health — if responding, server is fine regardless of PID tracking
         if self.check_health(server):
             self._consecutive_failures[server] = 0
+
+            # Check max uptime — restart CPU server periodically to prevent
+            # quality degradation after extended uptime (known ONNX Runtime issue)
+            if self.max_uptime_hours is not None and server == "cpu":
+                try:
+                    import json
+                    # Determine host/port for this server
+                    if server == "cpu":
+                        uptime_port = self.config.get("server.cpu.port", 1238)
+                        uptime_host = self.config.get("server.cpu.host", "0.0.0.0")
+                    else:
+                        uptime_port = self.config.get("server.npu.port", 1239)
+                        uptime_host = self.config.get("server.npu.host", "0.0.0.0")
+                    req = urllib.request.urlopen(
+                        f"http://{uptime_host}:{uptime_port}/health", timeout=5
+                    )
+                    health_data = json.loads(req.read().decode("utf-8"))
+                    uptime_seconds = health_data.get("uptime_seconds", 0)
+                    max_uptime_seconds = self.max_uptime_hours * 3600
+                    if uptime_seconds > 0 and uptime_seconds > max_uptime_seconds:
+                        print(
+                            f"Watchdog: {server.upper()} uptime {uptime_seconds:.0f}s "
+                            f"exceeds {self.max_uptime_hours}h, restarting to prevent "
+                            f"quality degradation...",
+                            flush=True,
+                        )
+                        self._alert(server, f"uptime {uptime_seconds:.0f}s exceeds {self.max_uptime_hours}h, restarting", "warning")
+                        self._record_restart(server)
+                        return self.manager.restart(server)
+                except Exception:
+                    pass  # Can't read uptime, skip uptime check
+
             return False
 
         # Health check failed — check if process is tracked
@@ -306,6 +340,8 @@ class Watchdog:
             print(f"Watchdog: Graceful degradation enabled", flush=True)
         if self.cooldown_seconds > 0:
             print(f"Watchdog: Cooldown: {self.cooldown_seconds}s", flush=True)
+        if self.max_uptime_hours:
+            print(f"Watchdog: Max uptime: {self.max_uptime_hours}h (auto-restart to prevent quality degradation)", flush=True)
 
         while self._running:
             for server in servers:
@@ -390,6 +426,8 @@ def watchdog_main() -> int:
                          help="Enable graceful degradation (reduce concurrency before restart)")
     parser.add_argument("--min-concurrent", type=int, default=1,
                          help="Minimum concurrent requests when degrading")
+    parser.add_argument("--max-uptime-hours", type=float, default=None,
+                         help="Max uptime in hours before auto-restart (prevents CPU quality degradation)")
     parser.add_argument("--status", action="store_true",
                          help="Show detailed status and exit")
 
@@ -403,6 +441,7 @@ def watchdog_main() -> int:
         min_tps=args.min_tps,
         max_error_rate=args.max_error_rate,
         max_latency_ms=args.max_latency_ms,
+        max_uptime_hours=args.max_uptime_hours,
         webhook_url=args.webhook,
         cooldown_seconds=args.cooldown,
         enable_degradation=args.degrade,
