@@ -74,22 +74,24 @@ curl -s -X POST http://localhost:1239/v1/chat/completions \
 ```
 lfm3-npu-tool/
 ├── bin/                          # CLI tools
-├── lib/lfm3_npu/                 # Python package
 ├── etc/                          # Config files
 │   ├── lfm3-npu-config.yaml      # Tooling configuration
 │   ├── lfm3-npu-env.sh           # Environment setup
 │   ├── lfm3-npu-cpu.service      # Systemd service (CPU)
 │   ├── lfm3-npu-npu.service      # Systemd service (NPU)
+│   ├── lfm3-npu-metrics.service  # Systemd service (metrics exporter)
 │   └── logrotate-lfm3-npu.conf   # Log rotation config
 ├── examples/                     # Example scripts
 ├── scripts/                      # Utility scripts
 │   ├── quality_benchmark.py      # Quality-scored benchmark (0-100)
 │   ├── concurrency_stress.py     # Concurrent stress test
-│   └── watchdog-cron.sh          # Cron wrapper for watchdog
+│   ├── watchdog-cron.sh          # Cron wrapper for watchdog
+│   └── npu_metrics_exporter.py   # Prometheus metrics exporter (port 9190)
 ├── tests/                        # Tooling test suite (5/5 passing)
 ├── var/                          # Logs and PID files
 ├── start-all.sh                  # Unified startup script (both servers)
 ├── install.sh                    # Installation script
+├── OPERATIONS_RUNBOOK.md         # Operations runbook
 ├── README.md                     # This file
 ├── FINAL_SUMMARY.md              # Overall project summary
 ├── EXHAUSTIVE_NPU_APPROACHES.md  # All VitisAI EP approaches attempted
@@ -108,6 +110,7 @@ lfm3-npu-tool/
 | `/home/scott/.config/flm/models/LFM3-1.7B-NPU2/` | Downloaded model files |
 | `/media/scott/data/lfm3-npu-server/` | CPU server (port 1238) |
 | Port 1239 | NPU server (FLM LFM3) |
+| Port 9190 | NPU Prometheus metrics exporter |
 
 ## Background: VitisAI EP Approaches Exhausted
 
@@ -150,6 +153,57 @@ Cron jobs:
 ./start-all.sh status  # Check both servers
 ./start-all.sh restart # Restart both servers
 ```
+
+### User Systemd Services (No Sudo Required)
+
+Services installed at `~/.config/systemd/user/`:
+
+```bash
+# Enable on boot
+systemctl --user enable lfm3-npu-cpu.service
+systemctl --user enable lfm3-npu-npu.service
+systemctl --user enable lfm3-npu-metrics.service
+
+# Start
+systemctl --user start lfm3-npu-cpu.service
+systemctl --user start lfm3-npu-npu.service
+systemctl --user start lfm3-npu-metrics.service
+
+# Status
+systemctl --user status lfm3-npu-cpu.service
+systemctl --user status lfm3-npu-npu.service
+systemctl --user status lfm3-npu-metrics.service
+
+# Logs
+journalctl --user -u lfm3-npu-cpu.service
+journalctl --user -u lfm3-npu-npu.service
+journalctl --user -u lfm3-npu-metrics.service
+```
+
+### NPU Prometheus Metrics Exporter (port 9190)
+
+```bash
+# Start via systemd
+systemctl --user start lfm3-npu-metrics.service
+
+# Or run manually
+python3 scripts/npu_metrics_exporter.py --port 9190 --npu-port 1239
+
+# Scrape metrics
+curl http://localhost:9190/metrics
+```
+
+Exposes: `lfm3_npu_up`, `lfm3_npu_total_models`, `lfm3_npu_lfm3_model_available`,
+`lfm3_npu_process_cpu_percent`, `lfm3_npu_process_memory_rss_bytes`,
+`lfm3_npu_process_memory_vms_bytes`, `lfm3_npu_process_threads`,
+`lfm3_npu_request_duration_seconds`.
+
+Configure Prometheus to scrape: `http://localhost:9190/metrics`
+
+### Operations Runbook
+
+See `OPERATIONS_RUNBOOK.md` for complete deployment, monitoring,
+troubleshooting, and maintenance procedures.
 
 ### Real-time Monitoring Dashboard
 

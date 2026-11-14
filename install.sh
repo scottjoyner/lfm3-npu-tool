@@ -110,6 +110,10 @@ if [ -f "${TOOLING_DIR}/etc/lfm3-npu-npu.service" ]; then
     cp "${TOOLING_DIR}/etc/lfm3-npu-npu.service" "${HOME}/.config/systemd/user/lfm3-npu-npu.service"
     echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-npu.service"
 fi
+if [ -f "${TOOLING_DIR}/etc/lfm3-npu-metrics.service" ]; then
+    cp "${TOOLING_DIR}/etc/lfm3-npu-metrics.service" "${HOME}/.config/systemd/user/lfm3-npu-metrics.service"
+    echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-metrics.service"
+fi
 if command -v systemctl &>/dev/null; then
     systemctl --user daemon-reload 2>/dev/null || true
     echo "  systemd user daemon reloaded."
@@ -182,6 +186,10 @@ echo "  lfm3-monitor"
 echo ""
 echo "  # Fleet status (with NPU device metrics)"
 echo "  lfm3-fleet-monitor --once"
+echo ""
+echo "  # NPU Prometheus metrics exporter"
+echo "  systemctl --user start lfm3-npu-metrics.service"
+echo "  curl http://localhost:9190/metrics"
 echo ""
 echo "  # Run watchdog (auto-restart CPU if uptime > 24h)"
 echo "  lfm3-npu watchdog --once --max-uptime-hours 24"

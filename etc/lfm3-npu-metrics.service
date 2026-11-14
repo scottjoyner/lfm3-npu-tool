@@ -1,0 +1,15 @@
+[Unit]
+Description=LFM3-1.7B NPU Prometheus Metrics Exporter (port 9190)
+After=network-online.target lfm3-npu-npu.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/npu_metrics_exporter.py --port 9190 --npu-port 1239 --interval 15
+Restart=on-failure
+RestartSec=5
+Environment=TMPDIR=/media/scott/data/tmp
+Environment=PATH=/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
