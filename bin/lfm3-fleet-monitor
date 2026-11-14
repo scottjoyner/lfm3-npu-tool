@@ -51,10 +51,16 @@ def fetch_json(url: str, timeout: float = 5.0) -> Dict[str, Any]:
         return {"error": str(e), "reachable": False}
 
 
-def fetch_server_status(port: int, host: str = DEFAULT_HOST) -> Dict[str, Any]:
-    """Fetch health, metrics, batch status, fleet status, and traces from a server."""
+def fetch_server_status(port: int, host: str = DEFAULT_HOST,
+                         server_type: str = "cpu") -> Dict[str, Any]:
+    """Fetch health, metrics, batch status, fleet status, and traces from a server.
+
+    CPU server exposes /health; NPU (FastFlowLM) server exposes /v1/models.
+    """
     base = f"http://{host}:{port}"
-    health = fetch_json(f"{base}/health")
+    # Use the appropriate health endpoint per server type
+    health_path = "/health" if server_type == "cpu" else "/v1/models"
+    health = fetch_json(f"{base}{health_path}")
     metrics = fetch_json(f"{base}/v1/metrics/detailed")
     batch = fetch_json(f"{base}/v1/batch/status")
     fleet = fetch_json(f"{base}/v1/fleet/status")
@@ -62,7 +68,9 @@ def fetch_server_status(port: int, host: str = DEFAULT_HOST) -> Dict[str, Any]:
 
     result: Dict[str, Any] = {
         "port": port,
-        "reachable": health.get("status") == "healthy",
+        "server_type": server_type,
+        "reachable": ("status" in health and health.get("status") == "healthy")
+                     or ("data" in health and len(health.get("data", [])) > 0),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -224,45 +232,58 @@ def format_status(server_statuses: Dict[str, Dict[str, Any]],
                 lines.append(f"  Error: {status['error']}")
             continue
 
-        lines.append(f"  Status: {status.get('status', 'unknown')}")
-        lines.append(f"  Model: {status.get('model', 'unknown')}")
-        lines.append(f"  Provider: {status.get('provider', 'unknown')}")
-        lines.append(f"  Uptime: {status.get('uptime_seconds', 0):.0f}s")
-        lines.append(f"  Active slots: {status.get('active_slots', 0)}")
-        lines.append(f"  Free slots: {status.get('free_slots', 0)}")
-        lines.append(f"  Avg decode: {status.get('avg_decode_ms', 0):.1f}ms")
+        stype = status.get("server_type", "cpu")
 
-        dm = status.get("detailed_metrics", {})
-        if dm:
-            completed = dm.get("completed", {})
-            if completed:
-                lines.append(f"  Avg TTFT: {completed.get('avg_ttft_ms', 0):.1f}ms")
-                lines.append(f"  P95 TTFT: {completed.get('p95_ttft_ms', 0):.1f}ms")
-                lines.append(f"  Avg token latency: {completed.get('avg_token_latency_ms', 0):.2f}ms")
-                lines.append(f"  Total requests: {dm.get('total_requests', 0)}")
-                lines.append(f"  Completed: {dm.get('completed_requests', 0)}")
+        if stype == "npu":
+            # NPU (FastFlowLM) /v1/models returns model list, not health metrics
+            lines.append("  Status: HEALTHY")
+            models = status.get("data", [])
+            lfm_models = [m for m in models if "lfm3" in str(m.get("id", ""))]
+            for m in lfm_models:
+                lines.append(f"  Model: {m.get('id', '?')} ({m.get('owned_by', '?')})")
+            lines.append(f"  Total models: {len(models)}")
+            lines.append(f"  Provider: FastFlowLM (liblfm3_npu.so)")
+        else:
+            # CPU server /health returns full health metrics
+            lines.append(f"  Status: {status.get('status', 'unknown')}")
+            lines.append(f"  Model: {status.get('model', 'unknown')}")
+            lines.append(f"  Provider: {status.get('provider', 'unknown')}")
+            lines.append(f"  Uptime: {status.get('uptime_seconds', 0):.0f}s")
+            lines.append(f"  Active slots: {status.get('active_slots', 0)}")
+            lines.append(f"  Free slots: {status.get('free_slots', 0)}")
+            lines.append(f"  Avg decode: {status.get('avg_decode_ms', 0):.1f}ms")
 
-        bm = status.get("batch_status", {}).get("metrics", {})
-        if bm:
-            lines.append(f"  Batcher prefill: {bm.get('prefill_count', 0)}")
-            lines.append(f"  Batcher decode: {bm.get('decode_count', 0)}")
-            lines.append(f"  Tokens generated: {bm.get('total_tokens_generated', 0)}")
+            dm = status.get("detailed_metrics", {})
+            if dm:
+                completed = dm.get("completed", {})
+                if completed:
+                    lines.append(f"  Avg TTFT: {completed.get('avg_ttft_ms', 0):.1f}ms")
+                    lines.append(f"  P95 TTFT: {completed.get('p95_ttft_ms', 0):.1f}ms")
+                    lines.append(f"  Avg token latency: {completed.get('avg_token_latency_ms', 0):.2f}ms")
+                    lines.append(f"  Total requests: {dm.get('total_requests', 0)}")
+                    lines.append(f"  Completed: {dm.get('completed_requests', 0)}")
 
-        # Recent traces
-        traces = status.get("traces", {})
-        if traces and "traces" in traces:
-            trace_list = traces.get("traces", [])
-            if trace_list:
-                lines.append(f"  Recent traces ({len(trace_list)}):")
-                for t in trace_list[:3]:
-                    ttft = t.get("ttft_ms", 0)
-                    tok_lat = t.get("total_latency_ms", 0)
-                    tok_count = t.get("total_tokens", 0)
-                    err = " [ERROR]" if t.get("error") else ""
-                    lines.append(f"    {t.get('req_id', '?')[:20]}: "
-                                 f"ttft={ttft:.1f}ms, "
-                                 f"latency={tok_lat:.1f}ms, "
-                                 f"tokens={tok_count}{err}")
+            bm = status.get("batch_status", {}).get("metrics", {})
+            if bm:
+                lines.append(f"  Batcher prefill: {bm.get('prefill_count', 0)}")
+                lines.append(f"  Batcher decode: {bm.get('decode_count', 0)}")
+                lines.append(f"  Tokens generated: {bm.get('total_tokens_generated', 0)}")
+
+            # Recent traces
+            traces = status.get("traces", {})
+            if traces and "traces" in traces:
+                trace_list = traces.get("traces", [])
+                if trace_list:
+                    lines.append(f"  Recent traces ({len(trace_list)}):")
+                    for t in trace_list[:3]:
+                        ttft = t.get("ttft_ms", 0)
+                        tok_lat = t.get("total_latency_ms", 0)
+                        tok_count = t.get("total_tokens", 0)
+                        err = " [ERROR]" if t.get("error") else ""
+                        lines.append(f"    {t.get('req_id', '?')[:20]}: "
+                                     f"ttft={ttft:.1f}ms, "
+                                     f"latency={tok_lat:.1f}ms, "
+                                     f"tokens={tok_count}{err}")
 
         # Estimated TPS
         tps = estimate_tps(status)
@@ -293,7 +314,8 @@ def gen_prometheus_config(servers: Dict[str, int]) -> str:
     lines.append("  - job_name: 'lfm3-inference'")
     lines.append("    scrape_interval: 15s")
     lines.append("    static_configs:")
-    for label, port in servers.items():
+    for label, srv in servers.items():
+        port = srv["port"] if isinstance(srv, dict) else srv
         lines.append(f"      - targets: ['localhost:{port}']")
         lines.append(f"        labels:")
         lines.append(f"          server: '{label}'")
@@ -432,25 +454,33 @@ def main():
         print(gen_grafana_dashboard())
         return
 
-    # Build server list
-    servers: Dict[str, int] = {"CPU": DEFAULT_CPU_PORT, "NPU": DEFAULT_NPU_PORT}
+    # Build server list (label -> {port, type})
+    servers: Dict[str, Dict[str, Any]] = {
+        "CPU": {"port": DEFAULT_CPU_PORT, "type": "cpu"},
+        "NPU": {"port": DEFAULT_NPU_PORT, "type": "npu"},
+    }
     if args.config:
         cfg = load_config(args.config)
         servers = {}
         for name, srv in cfg.get("servers", {}).items():
-            servers[name] = srv.get("port", 1238 if name.lower() == "cpu" else 1239)
+            servers[name] = {
+                "port": srv.get("port", 1238 if name.lower() == "cpu" else 1239),
+                "type": srv.get("type", "cpu" if name.lower() == "cpu" else "npu"),
+            }
 
     if not args.once and not args.watch:
         args.watch = True
 
     while True:
         server_statuses = {}
-        for label, port in servers.items():
+        for label, srv in servers.items():
+            port = srv["port"]
+            stype = srv.get("type", "cpu")
             host = DEFAULT_HOST
             if args.config:
                 cfg = load_config(args.config)
                 host = cfg.get("servers", {}).get(label, {}).get("host", DEFAULT_HOST)
-            server_statuses[label] = fetch_server_status(port, host)
+            server_statuses[label] = fetch_server_status(port, host, server_type=stype)
 
         alerts = evaluate_alerts(
             server_statuses,

@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+LFM3-1.7B Terminal Monitoring Dashboard.
+
+Real-time view of CPU (1238) and NPU (1239) inference servers.
+Refreshes every 5 seconds. Press Ctrl+C to exit.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+import urllib.request
+import urllib.error
+
+CPU_HOST = "127.0.0.1"
+CPU_PORT = 1238
+NPU_HOST = "127.0.0.1"
+NPU_PORT = 1239
+REFRESH = 5
+
+# ANSI colors
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def clear_screen():
+    """Clear the terminal screen."""
+    print("\033[2J\033[H", end="")
+
+
+def fetch_json(url, timeout=5):
+    """Fetch JSON from URL, return None on failure."""
+    try:
+        req = urllib.request.urlopen(url, timeout=timeout)
+        return json.loads(req.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def color_health(healthy):
+    """Return color-coded health string."""
+    if healthy:
+        return f"{GREEN}HEALTHY{RESET}"
+    return f"{RED}UNREACHABLE{RESET}"
+
+
+def format_cpu_status(data):
+    """Format CPU server status."""
+    if not data:
+        return [f"  {RED}UNREACHABLE{RESET} on {CPU_HOST}:{CPU_PORT}"]
+
+    lines = []
+    lines.append(f"  Status:      {color_health(data.get('status') == 'healthy')}")
+    lines.append(f"  Model:       {data.get('model', 'N/A')}")
+    lines.append(f"  Provider:    {data.get('provider', 'N/A')}")
+    lines.append(f"  Uptime:      {data.get('uptime_seconds', 0):.0f}s "
+                 f"({data.get('uptime_seconds', 0) / 3600:.1f}h)")
+    lines.append(f"  Avg decode:  {data.get('avg_decode_ms', 0):.1f}ms")
+    lines.append(f"  Active slots: {data.get('active_slots', 0)}/"
+                 f"{data.get('active_slots', 0) + data.get('free_slots', 0)}")
+    return lines
+
+
+def format_npu_status(data):
+    """Format NPU server status."""
+    if not data:
+        return [f"  {RED}UNREACHABLE{RESET} on {NPU_HOST}:{NPU_PORT}"]
+
+    lines = []
+    lines.append(f"  Status:      {color_health(True)}")
+    models = data.get("data", [])
+    lfm = [m for m in models if "lfm3" in str(m.get("id", ""))]
+    if lfm:
+        m = lfm[0]
+        lines.append(f"  Model:       {m.get('id', 'N/A')} ({m.get('owned_by', 'N/A')})")
+    lines.append(f"  Total models: {len(models)}")
+    lines.append(f"  Provider:    FastFlowLM (liblfm3_npu.so)")
+    return lines
+
+
+def print_header():
+    """Print dashboard header."""
+    print(f"{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+    print(f"{BOLD}  LFM3-1.7B Dual-Server Monitoring Dashboard{RESET}")
+    print(f"  Refreshed: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+
+
+def print_footer():
+    """Print dashboard footer."""
+    print(f"{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+    print(f"  CPU: http://{CPU_HOST}:{CPU_PORT}   NPU: http://{NPU_HOST}:{NPU_PORT}")
+    print(f"  Refresh: {REFRESH}s  |  Ctrl+C to exit")
+    print(f"{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+
+
+def main():
+    running = True
+
+    def signal_handler(signum, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    while running:
+        clear_screen()
+        print_header()
+
+        cpu_data = fetch_json(f"http://{CPU_HOST}:{CPU_PORT}/health")
+        npu_data = fetch_json(f"http://{NPU_HOST}:{NPU_PORT}/v1/models")
+
+        print(f"\n{CYAN}[CPU Server - Port {CPU_PORT}]{RESET}")
+        for line in format_cpu_status(cpu_data):
+            print(line)
+
+        print(f"\n{CYAN}[NPU Server - Port {NPU_PORT}]{RESET}")
+        for line in format_npu_status(npu_data):
+            print(line)
+
+        # Quick recommendation
+        cpu_ok = cpu_data and cpu_data.get("status") == "healthy"
+        npu_ok = npu_data and len(npu_data.get("data", [])) > 0
+
+        print(f"\n{YELLOW}Recommendation:{RESET}")
+        if npu_ok and cpu_ok:
+            print("  Both servers healthy. Use NPU (port 1239) for best quality & performance.")
+        elif npu_ok:
+            print("  NPU server healthy. Use NPU for inference.")
+        elif cpu_ok:
+            print("  Only CPU server healthy. Consider restarting NPU server.")
+        else:
+            print("  No servers healthy. Run: ./start-all.sh start")
+
+        print_footer()
+
+        # Wait for next refresh
+        deadline = time.time() + REFRESH
+        while running and time.time() < deadline:
+            time.sleep(0.2)
+
+    print(f"\n{GREEN}Dashboard stopped.{RESET}")
+
+
+if __name__ == "__main__":
+    main()
