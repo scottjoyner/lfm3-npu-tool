@@ -605,6 +605,18 @@ def cmd_doctor(args) -> int:
     import subprocess
     import shutil
 
+    # Source environment from env file if available (for cron/systemd context)
+    env_file = "/media/scott/data/lfm3-npu-tool/etc/lfm3-npu-env.sh"
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export ") and "=" in line:
+                    key, _, val = line[7:].partition("=")
+                    # Strip quotes
+                    val = val.strip('"').strip("'")
+                    os.environ[key.strip()] = val
+
     issues = []
     checks = []
 
