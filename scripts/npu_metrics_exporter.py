@@ -6,6 +6,9 @@ Exposes NPU server metrics in Prometheus text format on a configurable port.
 Scrapes the FastFlowLM NPU server (/v1/models, /v1/chat/completions) and
 process metrics (CPU, memory) to produce Prometheus-compatible output.
 
+Periodically sends test requests to the NPU server to measure real request
+durations (TTFT + decode time) for the request_duration_seconds histogram.
+
 Usage:
     python3 npu_metrics_exporter.py --port 9190 --npu-port 1239 --interval 15
 
@@ -15,8 +18,10 @@ Then configure Prometheus to scrape: http://localhost:9190/metrics
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -26,6 +31,7 @@ import psutil
 DEFAULT_PORT = 9190
 DEFAULT_NPU_PORT = 1239
 DEFAULT_INTERVAL = 15
+DEFAULT_TEST_PROMPT = "What is 2+2?"
 
 # Prometheus metric lines
 METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
@@ -34,6 +40,10 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_npu_total_models gauge
 # HELP lfm3_npu_lfm3_model_available Whether lfm3:1.7b model is available
 # TYPE lfm3_npu_lfm3_model_available gauge
+# HELP lfm3_npu_requests_total Total number of requests made by exporter
+# TYPE lfm3_npu_requests_total counter
+# HELP lfm3_npu_requests_errors_total Total number of failed requests
+# TYPE lfm3_npu_requests_errors_total counter
 # HELP lfm3_npu_process_cpu_percent NPU server process CPU usage percent
 # TYPE lfm3_npu_process_cpu_percent gauge
 # HELP lfm3_npu_process_memory_rss_bytes NPU server process RSS memory in bytes
@@ -44,96 +54,212 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_npu_process_threads gauge
 # HELP lfm3_npu_request_duration_seconds Histogram of request durations
 # TYPE lfm3_npu_request_duration_seconds histogram
+# HELP lfm3_npu_ttft_seconds Time to first token
+# TYPE lfm3_npu_ttft_seconds gauge
+# HELP lfm3_npu_decode_tokens_per_second Decode speed in tokens/sec
+# TYPE lfm3_npu_decode_tokens_per_second gauge
 """
 
 
-def fetch_json(url, timeout=10):
-    """Fetch JSON from URL, return None on failure."""
-    try:
-        req = urllib.request.urlopen(url, timeout=timeout)
-        return json.loads(req.read().decode("utf-8"))
-    except Exception:
-        return None
+class MetricsCollector:
+    """Collects and stores metrics from the NPU server."""
 
+    def __init__(self, npu_port: int, npu_host: str = "127.0.0.1",
+                 test_prompt: str = DEFAULT_TEST_PROMPT,
+                 max_duration_samples: int = 1000):
+        self.npu_port = npu_port
+        self.npu_host = npu_host
+        self.test_prompt = test_prompt
+        self.max_duration_samples = max_duration_samples
+        self._lock = threading.Lock()
+        self._durations: list[float] = []
+        self._ttfts: list[float] = []
+        self._decodes: list[float] = []
+        self._requests_total = 0
+        self._requests_errors = 0
+        self._last_ttft = 0.0
+        self._last_decode_tps = 0.0
 
-def find_npu_process(port):
-    """Find the NPU server process by command line."""
-    for proc in psutil.process_iter(["pid", "cmdline"]):
+    def fetch_json(self, url: str, timeout: float = 10.0):
+        """Fetch JSON from URL, return None on failure."""
         try:
-            cmdline = " ".join(proc.info["cmdline"] or [])
-            if "flm" in cmdline and "serve" in cmdline and str(port) in cmdline:
-                return proc
+            req = urllib.request.urlopen(url, timeout=timeout)
+            return json.loads(req.read().decode("utf-8"))
         except Exception:
-            continue
-    return None
+            return None
 
-
-def get_process_metrics(proc):
-    """Get CPU and memory metrics for a process."""
-    try:
-        with proc.oneshot():
-            return {
-                "cpu_percent": proc.cpu_percent(interval=0.1),
-                "memory_rss_bytes": proc.memory_info().rss,
-                "memory_vms_bytes": proc.memory_info().vms,
-                "num_threads": proc.num_threads(),
-            }
-    except Exception:
+    def find_npu_process(self):
+        """Find the NPU server process by command line."""
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if "flm" in cmdline and "serve" in cmdline and str(self.npu_port) in cmdline:
+                    return proc
+            except Exception:
+                continue
         return None
 
+    def get_process_metrics(self, proc):
+        """Get CPU and memory metrics for a process."""
+        try:
+            with proc.oneshot():
+                return {
+                    "cpu_percent": proc.cpu_percent(interval=0.1),
+                    "memory_rss_bytes": proc.memory_info().rss,
+                    "memory_vms_bytes": proc.memory_info().vms,
+                    "num_threads": proc.num_threads(),
+                }
+        except Exception:
+            return None
 
-def scrape_npu_metrics(npu_port, npu_host="127.0.0.1"):
-    """Scrape all available metrics from the NPU server."""
-    metrics = {
-        "up": 0,
-        "total_models": 0,
-        "lfm3_available": 0,
-        "process_cpu_percent": 0,
-        "process_memory_rss_bytes": 0,
-        "process_memory_vms_bytes": 0,
-        "process_threads": 0,
-        "request_duration_seconds": [],
-    }
+    def send_test_request(self) -> dict:
+        """Send a test request to the NPU server and measure duration."""
+        payload = {
+            "model": "lfm3:1.7b",
+            "messages": [{"role": "user", "content": self.test_prompt}],
+            "max_tokens": 20,
+            "temperature": 0.7,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://{self.npu_host}:{self.npu_port}/v1/chat/completions",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        start = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            duration = time.perf_counter() - start
+            usage = result.get("usage", {})
+            ttft = usage.get("prefill_duration_ttft", 0) or 0
+            decode_tps = usage.get("decoding_speed_tps", 0) or 0
+            return {
+                "success": True,
+                "duration": duration,
+                "ttft": ttft,
+                "decode_tps": decode_tps,
+            }
+        except Exception:
+            duration = time.perf_counter() - start
+            return {
+                "success": False,
+                "duration": duration,
+                "ttft": 0,
+                "decode_tps": 0,
+            }
 
-    # Check /v1/models
-    models_data = fetch_json(f"http://{npu_host}:{npu_port}/v1/models", timeout=10)
-    if models_data and "data" in models_data:
-        metrics["up"] = 1
-        models = models_data["data"]
-        metrics["total_models"] = len(models)
-        lfm_models = [m for m in models if "lfm3" in str(m.get("id", ""))]
-        if lfm_models:
-            metrics["lfm3_available"] = 1
+    def scrape(self) -> dict:
+        """Scrape all available metrics from the NPU server."""
+        with self._lock:
+            durations = list(self._durations)
+            ttfts = list(self._ttfts)
+            decodes = list(self._decodes)
+            requests_total = self._requests_total
+            requests_errors = self._requests_errors
+            last_ttft = self._last_ttft
+            last_decode_tps = self._last_decode_tps
 
-    # Process metrics
-    proc = find_npu_process(npu_port)
-    if proc:
-        pm = get_process_metrics(proc)
-        if pm:
-            metrics["process_cpu_percent"] = pm["cpu_percent"]
-            metrics["process_memory_rss_bytes"] = pm["memory_rss_bytes"]
-            metrics["process_memory_vms_bytes"] = pm["memory_vms_bytes"]
-            metrics["process_threads"] = pm["num_threads"]
+        # Send a test request to measure real duration
+        test_result = self.send_test_request()
+        with self._lock:
+            self._requests_total += 1
+            if not test_result["success"]:
+                self._requests_errors += 1
+            else:
+                self._durations.append(test_result["duration"])
+                self._ttfts.append(test_result["ttft"])
+                self._decodes.append(test_result["decode_tps"])
+                # Trim to max samples
+                if len(self._durations) > self.max_duration_samples:
+                    self._durations = self._durations[-self.max_duration_samples:]
+                if len(self._ttfts) > self.max_duration_samples:
+                    self._ttfts = self._ttfts[-self.max_duration_samples:]
+                if len(self._decodes) > self.max_duration_samples:
+                    self._decodes = self._decodes[-self.max_duration_samples:]
+                # Update last values
+                self._last_ttft = test_result["ttft"]
+                self._last_decode_tps = test_result["decode_tps"]
 
-    return metrics
+            # Re-read after update
+            durations = list(self._durations)
+            ttfts = list(self._ttfts)
+            decodes = list(self._decodes)
+            requests_total = self._requests_total
+            requests_errors = self._requests_errors
+            last_ttft = self._last_ttft
+            last_decode_tps = self._last_decode_tps
+
+        # Check /v1/models
+        models_data = self.fetch_json(
+            f"http://{self.npu_host}:{self.npu_port}/v1/models", timeout=10
+        )
+        up = 0
+        total_models = 0
+        lfm3_available = 0
+        if models_data and "data" in models_data:
+            up = 1
+            models = models_data["data"]
+            total_models = len(models)
+            lfm_models = [m for m in models if "lfm3" in str(m.get("id", ""))]
+            if lfm_models:
+                lfm3_available = 1
+
+        # Process metrics
+        proc = self.find_npu_process()
+        process_cpu_percent = 0
+        process_memory_rss_bytes = 0
+        process_memory_vms_bytes = 0
+        process_threads = 0
+        if proc:
+            pm = self.get_process_metrics(proc)
+            if pm:
+                process_cpu_percent = pm["cpu_percent"]
+                process_memory_rss_bytes = pm["memory_rss_bytes"]
+                process_memory_vms_bytes = pm["memory_vms_bytes"]
+                process_threads = pm["num_threads"]
+
+        return {
+            "up": up,
+            "total_models": total_models,
+            "lfm3_available": lfm3_available,
+            "process_cpu_percent": process_cpu_percent,
+            "process_memory_rss_bytes": process_memory_rss_bytes,
+            "process_memory_vms_bytes": process_memory_vms_bytes,
+            "process_threads": process_threads,
+            "durations": durations,
+            "ttfts": ttfts,
+            "decodes": decodes,
+            "requests_total": requests_total,
+            "requests_errors": requests_errors,
+            "last_ttft": last_ttft,
+            "last_decode_tps": last_decode_tps,
+            "last_duration": test_result["duration"],
+            "last_success": test_result["success"],
+        }
 
 
-def format_prometheus(metrics):
+def format_prometheus(metrics: dict) -> str:
     """Format metrics in Prometheus text format."""
     lines = []
     lines.append(METRICS_HEADER)
     lines.append(f'lfm3_npu_up {metrics["up"]}')
     lines.append(f'lfm3_npu_total_models {metrics["total_models"]}')
     lines.append(f'lfm3_npu_lfm3_model_available {metrics["lfm3_available"]}')
+    lines.append(f'lfm3_npu_requests_total {metrics["requests_total"]}')
+    lines.append(f'lfm3_npu_requests_errors_total {metrics["requests_errors"]}')
     lines.append(f'lfm3_npu_process_cpu_percent {metrics["process_cpu_percent"]}')
     lines.append(f'lfm3_npu_process_memory_rss_bytes {metrics["process_memory_rss_bytes"]}')
     lines.append(f'lfm3_npu_process_memory_vms_bytes {metrics["process_memory_vms_bytes"]}')
     lines.append(f'lfm3_npu_process_threads {metrics["process_threads"]}')
+    lines.append(f'lfm3_npu_ttft_seconds {metrics["last_ttft"]}')
+    lines.append(f'lfm3_npu_decode_tokens_per_second {metrics["last_decode_tps"]}')
 
-    # Request duration histogram (simple bucket counts)
-    durations = metrics["request_duration_seconds"]
+    # Request duration histogram
+    durations = metrics["durations"]
+    buckets = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
     if durations:
-        buckets = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
         bucket_counts = {b: 0 for b in buckets}
         for d in durations:
             for b in buckets:
@@ -148,8 +274,7 @@ def format_prometheus(metrics):
         lines.append(f'lfm3_npu_request_duration_seconds_sum {sum(durations)}')
         lines.append(f'lfm3_npu_request_duration_seconds_count {total}')
     else:
-        # Empty histogram with zero counts
-        for b in [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]:
+        for b in buckets:
             lines.append(f'lfm3_npu_request_duration_seconds_bucket{{le="{b}"}} 0')
         lines.append('lfm3_npu_request_duration_seconds_bucket{le="+Inf"} 0')
         lines.append('lfm3_npu_request_duration_seconds_sum 0')
@@ -168,8 +293,10 @@ def main():
                         help=f"NPU server port (default: {DEFAULT_NPU_PORT})")
     parser.add_argument("--npu-host", default="127.0.0.1",
                         help="NPU server host (default: 127.0.0.1)")
-    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
-                        help=f"Scrape interval in seconds (default: {DEFAULT_INTERVAL})")
+    parser.add_argument("--test-prompt", default=DEFAULT_TEST_PROMPT,
+                        help=f"Test prompt for duration measurement (default: '{DEFAULT_TEST_PROMPT}')")
+    parser.add_argument("--max-samples", type=int, default=1000,
+                        help="Max duration samples to keep (default: 1000)")
     parser.add_argument("--once", action="store_true",
                         help="Scrape once and exit (for testing)")
     args = parser.parse_args()
@@ -177,10 +304,17 @@ def main():
     import http.server
     import socketserver
 
+    collector = MetricsCollector(
+        npu_port=args.npu_port,
+        npu_host=args.npu_host,
+        test_prompt=args.test_prompt,
+        max_duration_samples=args.max_samples,
+    )
+
     class MetricsHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/metrics":
-                metrics = scrape_npu_metrics(args.npu_port, args.npu_host)
+                metrics = collector.scrape()
                 body = format_prometheus(metrics).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -188,7 +322,7 @@ def main():
                 self.end_headers()
                 self.wfile.write(body)
             elif self.path == "/health":
-                metrics = scrape_npu_metrics(args.npu_port, args.npu_host)
+                metrics = collector.scrape()
                 healthy = metrics["up"] == 1
                 body = json.dumps({"healthy": healthy, "up": metrics["up"]}).encode("utf-8")
                 self.send_response(200 if healthy else 503)
@@ -204,7 +338,7 @@ def main():
             pass  # Suppress default logging
 
     if args.once:
-        metrics = scrape_npu_metrics(args.npu_port, args.npu_host)
+        metrics = collector.scrape()
         print(format_prometheus(metrics))
         return 0
 
