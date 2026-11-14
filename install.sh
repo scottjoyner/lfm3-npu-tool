@@ -102,18 +102,14 @@ fi
 # Install user systemd services
 echo ""
 echo "[6/8] Installing user systemd services..."
-if [ -f "${TOOLING_DIR}/etc/lfm3-npu-cpu.service" ]; then
-    cp "${TOOLING_DIR}/etc/lfm3-npu-cpu.service" "${HOME}/.config/systemd/user/lfm3-npu-cpu.service"
-    echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-cpu.service"
-fi
-if [ -f "${TOOLING_DIR}/etc/lfm3-npu-npu.service" ]; then
-    cp "${TOOLING_DIR}/etc/lfm3-npu-npu.service" "${HOME}/.config/systemd/user/lfm3-npu-npu.service"
-    echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-npu.service"
-fi
-if [ -f "${TOOLING_DIR}/etc/lfm3-npu-metrics.service" ]; then
-    cp "${TOOLING_DIR}/etc/lfm3-npu-metrics.service" "${HOME}/.config/systemd/user/lfm3-npu-metrics.service"
-    echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-metrics.service"
-fi
+for svc in lfm3-npu-cpu.service lfm3-npu-npu.service lfm3-npu-metrics.service \
+           lfm3-npu-watchdog.service lfm3-npu-watchdog.timer \
+           lfm3-npu-doctor.service lfm3-npu-doctor.timer; do
+    if [ -f "${TOOLING_DIR}/etc/$svc" ]; then
+        cp "${TOOLING_DIR}/etc/$svc" "${HOME}/.config/systemd/user/$svc"
+        echo "  Installed: ${HOME}/.config/systemd/user/$svc"
+    fi
+done
 if command -v systemctl &>/dev/null; then
     systemctl --user daemon-reload 2>/dev/null || true
     echo "  systemd user daemon reloaded."
@@ -190,6 +186,10 @@ echo ""
 echo "  # NPU Prometheus metrics exporter"
 echo "  systemctl --user start lfm3-npu-metrics.service"
 echo "  curl http://localhost:9190/metrics"
+echo ""
+echo "  # Enable systemd timers (auto-start on boot)"
+echo "  systemctl --user enable --now lfm3-npu-watchdog.timer   # Watchdog every 5 min"
+echo "  systemctl --user enable --now lfm3-npu-doctor.timer      # Doctor hourly"
 echo ""
 echo "  # Run watchdog (auto-restart CPU if uptime > 24h)"
 echo "  lfm3-npu watchdog --once --max-uptime-hours 24"

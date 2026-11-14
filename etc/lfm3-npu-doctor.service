@@ -1,0 +1,11 @@
+[Unit]
+Description=LFM3-1.7B Doctor Service - Run system health diagnosis
+
+[Service]
+Type=oneshot
+ExecStart=/media/scott/data/lfm3-npu-tool/bin/lfm3-npu doctor
+Environment=TMPDIR=/media/scott/data/tmp
+Environment=LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib:${LD_LIBRARY_PATH:-}
+Environment=XILINX_XRT=/opt/xilinx/xrt
+Environment=FLM_MODEL_PATH=/home/scott/.config/flm/models
+Environment=PATH=/opt/xilinx/xrt/bin:/usr/bin:/bin

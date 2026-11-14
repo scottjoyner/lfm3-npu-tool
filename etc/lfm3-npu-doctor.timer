@@ -1,0 +1,9 @@
+[Unit]
+Description=LFM3-1.7B Doctor - Full system health diagnosis
+
+[Timer]
+OnCalendar=*-*-* *:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
