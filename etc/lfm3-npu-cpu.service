@@ -1,18 +1,17 @@
 [Unit]
-Description=LFM3-1.7B CPU Inference Server (ONNX Runtime)
-After=network.target
+Description=LFM3-1.7B CPU Inference Server (ONNX Runtime, port 1238)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=scott
-WorkingDirectory=/media/scott/data/lfm3-npu-tool
+ExecStart=/media/scott/data/ryzen-ai-venv/bin/python -B /media/scott/data/lfm3-npu-tool/lib/lfm3_npu/cpu_batched_server.py --host 0.0.0.0 --port 1238
+Restart=on-failure
+RestartSec=5
 Environment=TMPDIR=/media/scott/data/tmp
 Environment=LD_LIBRARY_PATH=/media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/flexml/flexml_extras/lib:/media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/voe/lib:/opt/xilinx/xrt/lib
 Environment=XLNX_CACHE_DIR=/media/scott/data/vitisai_cache
-ExecStart=/media/scott/data/ryzen-ai-venv/bin/python -B /media/scott/data/lfm3-npu-tool/lib/lfm3_npu/cpu_batched_server.py --host 0.0.0.0 --port 1238
-Restart=always
-RestartSec=5
-RestartPreventExitStatus=1
+Environment=PATH=/opt/xilinx/xrt/bin:/usr/bin:/bin
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

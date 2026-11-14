@@ -19,11 +19,14 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import psutil
 
 DEFAULT_CPU_PORT = 1238
 DEFAULT_NPU_PORT = 1239
@@ -49,6 +52,60 @@ def fetch_json(url: str, timeout: float = 5.0) -> Dict[str, Any]:
         return json.loads(req.read().decode("utf-8"))
     except Exception as e:
         return {"error": str(e), "reachable": False}
+
+
+def get_npu_device_info() -> Dict[str, Any]:
+    """Get NPU device information via xrt-smi.
+
+    Returns dict with device status, utilization, memory if available.
+    """
+    info: Dict[str, Any] = {
+        "available": False,
+        "device_name": None,
+        "architecture": None,
+        "firmware": None,
+        "bdf": None,
+    }
+    try:
+        result = subprocess.run(
+            ["xrt-smi", "examine"], capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout
+        if "Strix Halo" in output or "aie2p" in output:
+            info["available"] = True
+            for line in output.split("\n"):
+                line = line.strip()
+                if "Strix Halo" in line or "NPU" in line:
+                    parts = line.split("|")
+                    if len(parts) >= 4:
+                        info["bdf"] = parts[0].strip()
+                        info["device_name"] = parts[1].strip()
+                        info["architecture"] = parts[2].strip()
+                        if len(parts) >= 5:
+                            info["topology"] = parts[4].strip()
+                if "Firmware" in line or "firmware" in line.lower():
+                    info["firmware"] = line.split(":")[-1].strip() if ":" in line else line
+    except Exception:
+        pass
+    return info
+
+
+def get_process_metrics(pid: int) -> Dict[str, Any]:
+    """Get CPU and memory metrics for a process."""
+    try:
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            cpu = proc.cpu_percent(interval=0.1)
+            mem = proc.memory_info()
+            return {
+                "cpu_percent": cpu,
+                "memory_rss_mb": mem.rss / 1024 / 1024,
+                "memory_vms_mb": mem.vms / 1024 / 1024,
+                "num_threads": proc.num_threads(),
+                "create_time": proc.create_time(),
+            }
+    except Exception:
+        return {}
 
 
 def fetch_server_status(port: int, host: str = DEFAULT_HOST,
@@ -84,6 +141,28 @@ def fetch_server_status(port: int, host: str = DEFAULT_HOST,
         result["fleet_status"] = fleet
     if traces and "error" not in traces:
         result["traces"] = traces
+
+    # Add process-level metrics if we have a PID
+    if server_type == "cpu" and health.get("status") == "healthy":
+        # Try to find the CPU server process
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if "cpu_batched_server.py" in cmdline and str(port) in cmdline:
+                    result["process_metrics"] = get_process_metrics(proc.info["pid"])
+                    break
+            except Exception:
+                continue
+    elif server_type == "npu" and ("data" in health and len(health.get("data", [])) > 0):
+        # Try to find the NPU server process
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if "flm" in cmdline and "serve" in cmdline and str(port) in cmdline:
+                    result["process_metrics"] = get_process_metrics(proc.info["pid"])
+                    break
+            except Exception:
+                continue
 
     return result
 
@@ -166,6 +245,27 @@ def evaluate_alerts(
                     "message": f"{label} avg token latency ({avg_latency:.1f}ms) above threshold ({max_latency_ms}ms)",
                 })
 
+    # NPU device availability alert
+    npu_info = get_npu_device_info()
+    if not npu_info["available"]:
+        alerts.append({
+            "server": "npu",
+            "severity": "critical",
+            "message": "NPU device not available via xrt-smi",
+        })
+
+    # NPU server memory alert
+    npu_status = server_statuses.get("NPU", {})
+    if npu_status.get("reachable"):
+        pm = npu_status.get("process_metrics", {})
+        rss_mb = pm.get("memory_rss_mb", 0)
+        if rss_mb > 0 and rss_mb > 4000:  # Alert if NPU server uses >4GB RSS
+            alerts.append({
+                "server": "npu",
+                "severity": "warning",
+                "message": f"NPU server RSS memory ({rss_mb:.0f} MB) above 4000 MB threshold",
+            })
+
     return alerts
 
 
@@ -223,6 +323,21 @@ def format_status(server_statuses: Dict[str, Dict[str, Any]],
     lines.append("=" * 70)
     lines.append(f"LFM3-1.7B Fleet Status - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     lines.append("=" * 70)
+
+    # NPU device info
+    npu_info = get_npu_device_info()
+    if npu_info["available"]:
+        lines.append(f"\n[NPU Device]")
+        lines.append(f"  Device: {npu_info.get('device_name', 'N/A')}")
+        lines.append(f"  BDF: {npu_info.get('bdf', 'N/A')}")
+        lines.append(f"  Architecture: {npu_info.get('architecture', 'N/A')}")
+        if npu_info.get("topology"):
+            lines.append(f"  Topology: {npu_info['topology']}")
+        if npu_info.get("firmware"):
+            lines.append(f"  Firmware: {npu_info['firmware']}")
+    else:
+        lines.append(f"\n[NPU Device]")
+        lines.append(f"  Status: NOT AVAILABLE")
 
     for label, status in server_statuses.items():
         lines.append(f"\n[{label} Server - Port {status.get('port', '?')}]")
@@ -284,6 +399,14 @@ def format_status(server_statuses: Dict[str, Dict[str, Any]],
                                      f"ttft={ttft:.1f}ms, "
                                      f"latency={tok_lat:.1f}ms, "
                                      f"tokens={tok_count}{err}")
+
+        # Process-level metrics
+        pm = status.get("process_metrics", {})
+        if pm:
+            lines.append(f"  Process CPU: {pm.get('cpu_percent', 0):.1f}%")
+            lines.append(f"  Process RSS: {pm.get('memory_rss_mb', 0):.0f} MB")
+            lines.append(f"  Process VMS: {pm.get('memory_vms_mb', 0):.0f} MB")
+            lines.append(f"  Process threads: {pm.get('num_threads', 0)}")
 
         # Estimated TPS
         tps = estimate_tps(status)

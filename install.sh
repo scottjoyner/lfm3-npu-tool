@@ -46,19 +46,21 @@ fi
 
 # Create directories
 echo ""
-echo "[2/7] Creating directories..."
+echo "[2/8] Creating directories..."
 mkdir -p "$CONFIG_DIR"
 mkdir -p "${TOOLING_DIR}/var/log"
 mkdir -p "${TOOLING_DIR}/var/run"
 mkdir -p "${TOOLING_DIR}/scripts"
+mkdir -p "${HOME}/.config/systemd/user"
 echo "  Config: $CONFIG_DIR"
 echo "  Logs:   ${TOOLING_DIR}/var/log"
 echo "  PIDs:   ${TOOLING_DIR}/var/run"
 echo "  Scripts: ${TOOLING_DIR}/scripts"
+echo "  Systemd user: ${HOME}/.config/systemd/user"
 
 # Install configuration
 echo ""
-echo "[3/7] Installing configuration..."
+echo "[3/8] Installing configuration..."
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     cp "${TOOLING_DIR}/etc/lfm3-npu-config.yaml" "$CONFIG_DIR/config.yaml"
     echo "  Config installed: $CONFIG_DIR/config.yaml"
@@ -68,8 +70,8 @@ fi
 
 # Install executables
 echo ""
-echo "[4/7] Installing executables..."
-for tool in lfm3-npu lfm3-monitor lfm3-npu-server-mgr lfm3-npu-health; do
+echo "[4/8] Installing executables..."
+for tool in lfm3-npu lfm3-monitor lfm3-fleet-monitor lfm3-npu-server-mgr lfm3-npu-health; do
     if [ -f "${TOOLING_DIR}/bin/$tool" ]; then
         cp "${TOOLING_DIR}/bin/$tool" "$INSTALL_DIR/$tool"
         chmod +x "$INSTALL_DIR/$tool"
@@ -81,8 +83,8 @@ done
 
 # Install scripts
 echo ""
-echo "[5/7] Installing scripts..."
-for script in watchdog-cron.sh; do
+echo "[5/8] Installing scripts..."
+for script in watchdog-cron.sh quality_benchmark.py concurrency_stress.py; do
     if [ -f "${TOOLING_DIR}/scripts/$script" ]; then
         cp "${TOOLING_DIR}/scripts/$script" "${TOOLING_DIR}/scripts/$script"
         chmod +x "${TOOLING_DIR}/scripts/$script"
@@ -97,9 +99,31 @@ if [ -f "${TOOLING_DIR}/start-all.sh" ]; then
     echo "  Installed: ${TOOLING_DIR}/start-all.sh"
 fi
 
+# Install user systemd services
+echo ""
+echo "[6/8] Installing user systemd services..."
+if [ -f "${TOOLING_DIR}/etc/lfm3-npu-cpu.service" ]; then
+    cp "${TOOLING_DIR}/etc/lfm3-npu-cpu.service" "${HOME}/.config/systemd/user/lfm3-npu-cpu.service"
+    echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-cpu.service"
+fi
+if [ -f "${TOOLING_DIR}/etc/lfm3-npu-npu.service" ]; then
+    cp "${TOOLING_DIR}/etc/lfm3-npu-npu.service" "${HOME}/.config/systemd/user/lfm3-npu-npu.service"
+    echo "  Installed: ${HOME}/.config/systemd/user/lfm3-npu-npu.service"
+fi
+if command -v systemctl &>/dev/null; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo "  systemd user daemon reloaded."
+fi
+
+# Install logrotate config
+if [ -f "${TOOLING_DIR}/etc/logrotate-lfm3-npu.conf" ]; then
+    cp "${TOOLING_DIR}/etc/logrotate-lfm3-npu.conf" "${HOME}/.config/logrotate-lfm3-npu.conf"
+    echo "  Logrotate config: ${HOME}/.config/logrotate-lfm3-npu.conf"
+fi
+
 # Create symlinks
 echo ""
-echo "[6/7] Creating convenience symlinks..."
+echo "[7/8] Creating convenience symlinks..."
 for alias_name in lfm3-npu-gen lfm3-npu-bench lfm3-npu-convert lfm3-npu-doctor lfm3-npu-monitor; do
     ln -sf "$INSTALL_DIR/lfm3-npu" "$INSTALL_DIR/$alias_name" 2>/dev/null || true
 done
@@ -107,14 +131,14 @@ echo "  Symlinks created."
 
 # Setup cron watchdog
 echo ""
-echo "[7/7] Setting up automated watchdog (cron)..."
+echo "[8/8] Setting up automated watchdog (cron)..."
 if command -v crontab &>/dev/null; then
     # Check if already installed
     if crontab -l 2>/dev/null | grep -q "watchdog-cron.sh"; then
         echo "  Cron watchdog already configured, skipping."
     else
-        (crontab -l 2>/dev/null; echo ""; echo "# LFM3-1.7B NPU inference servers - watchdog every 5 min"; echo "*/5 * * * * /media/scott/data/lfm3-npu-tool/scripts/watchdog-cron.sh >> /media/scott/data/lfm3-npu-tool/var/log/watchdog-cron.log 2>&1"; echo "# LFM3-1.7B NPU inference servers - doctor every hour"; echo "0 * * * * /media/scott/data/lfm3-npu-tool/bin/lfm3-npu doctor >> /media/scott/data/lfm3-npu-tool/var/log/doctor-cron.log 2>&1") | crontab -
-        echo "  Cron watchdog configured (every 5 min) + doctor (hourly)."
+        (crontab -l 2>/dev/null; echo ""; echo "# LFM3-1.7B NPU inference servers - watchdog every 5 min"; echo "*/5 * * * * /media/scott/data/lfm3-npu-tool/scripts/watchdog-cron.sh >> /media/scott/data/lfm3-npu-tool/var/log/watchdog-cron.log 2>&1"; echo "# LFM3-1.7B NPU inference servers - doctor every hour"; echo "0 * * * * /media/scott/data/lfm3-npu-tool/bin/lfm3-npu doctor >> /media/scott/data/lfm3-npu-tool/var/log/doctor-cron.log 2>&1"; echo "# LFM3-1.7B NPU inference servers - auto-start on reboot"; echo "@reboot /media/scott/data/lfm3-npu-tool/start-all.sh start >> /media/scott/data/lfm3-npu-tool/var/log/boot-start.log 2>&1") | crontab -
+        echo "  Cron watchdog configured (every 5 min) + doctor (hourly) + auto-start on reboot."
     fi
 else
     echo "  Skipped (crontab not available)."
@@ -133,15 +157,19 @@ echo "============================================================"
 echo ""
 echo "Usage examples:"
 echo ""
-echo "  # Start both servers"
+echo "  # Start both servers (via script)"
 echo "  ${TOOLING_DIR}/start-all.sh start"
 echo ""
-echo "  # Generate text on NPU"
-echo "  lfm3-npu generate \"The quick brown fox\" --max-tokens 30 --server npu"
+echo "  # Start both servers (via user systemd)"
+echo "  systemctl --user start lfm3-npu-cpu.service"
+echo "  systemctl --user start lfm3-npu-npu.service"
 echo ""
 echo "  # Check server health"
 echo "  lfm3-npu status"
 echo "  lfm3-npu doctor"
+echo ""
+echo "  # Generate text on NPU"
+echo "  lfm3-npu generate \"The quick brown fox\" --max-tokens 30 --server npu"
 echo ""
 echo "  # Benchmark performance"
 echo "  lfm3-npu bench --server npu --tokens 50 --iterations 3"
@@ -152,8 +180,17 @@ echo ""
 echo "  # Monitor servers (real-time dashboard)"
 echo "  lfm3-monitor"
 echo ""
+echo "  # Fleet status (with NPU device metrics)"
+echo "  lfm3-fleet-monitor --once"
+echo ""
 echo "  # Run watchdog (auto-restart CPU if uptime > 24h)"
 echo "  lfm3-npu watchdog --once --max-uptime-hours 24"
+echo ""
+echo "  # Quality benchmark (0-100 scoring)"
+echo "  python3 ${TOOLING_DIR}/scripts/quality_benchmark.py --server both"
+echo ""
+echo "  # Concurrency stress test"
+echo "  python3 ${TOOLING_DIR}/scripts/concurrency_stress.py --server both --concurrency 4 --requests 20"
 echo ""
 echo "Configuration file: $CONFIG_DIR/config.yaml"
 echo "Logs:               ${TOOLING_DIR}/var/log/"
@@ -161,4 +198,5 @@ echo "PIDs:               ${TOOLING_DIR}/var/run/"
 echo ""
 echo "NOTE: NPU server requires /dev/accel0 access and FastFlowLM v1.0.12."
 echo "      CPU server does not require root."
+echo "      User systemd services require no sudo (systemctl --user)."
 echo ""

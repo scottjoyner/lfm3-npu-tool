@@ -1,19 +1,18 @@
 [Unit]
-Description=LFM3-1.7B NPU Inference Server (FastFlowLM)
-After=network.target
+Description=LFM3-1.7B NPU Inference Server (FastFlowLM, port 1239)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=scott
-WorkingDirectory=/media/scott/data/lfm3-npu-tool
+ExecStart=/tmp/flm serve lfm3:1.7b -p 1239 --host 127.0.0.1
+Restart=on-failure
+RestartSec=5
 Environment=TMPDIR=/media/scott/data/tmp
 Environment=LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib
 Environment=XILINX_XRT=/opt/xilinx/xrt
 Environment=FLM_MODEL_PATH=/home/scott/.config/flm/models
-ExecStart=/tmp/flm serve lfm3:1.7b -p 1239 --host 127.0.0.1
-Restart=always
-RestartSec=5
-RestartPreventExitStatus=1
+Environment=PATH=/opt/xilinx/xrt/bin:/usr/bin:/bin
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
