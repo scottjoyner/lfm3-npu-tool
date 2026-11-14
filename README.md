@@ -76,9 +76,19 @@ lfm3-npu-tool/
 ├── bin/                          # CLI tools
 ├── lib/lfm3_npu/                 # Python package
 ├── etc/                          # Config files
+│   ├── lfm3-npu-config.yaml      # Tooling configuration
+│   ├── lfm3-npu-env.sh           # Environment setup
+│   ├── lfm3-npu-cpu.service      # Systemd service (CPU)
+│   ├── lfm3-npu-npu.service      # Systemd service (NPU)
+│   └── logrotate-lfm3-npu.conf   # Log rotation config
 ├── examples/                     # Example scripts
+├── scripts/                      # Utility scripts
+│   ├── quality_benchmark.py      # Quality-scored benchmark (0-100)
+│   ├── concurrency_stress.py     # Concurrent stress test
+│   └── watchdog-cron.sh          # Cron wrapper for watchdog
 ├── tests/                        # Tooling test suite (5/5 passing)
 ├── var/                          # Logs and PID files
+├── start-all.sh                  # Unified startup script (both servers)
 ├── install.sh                    # Installation script
 ├── README.md                     # This file
 ├── FINAL_SUMMARY.md              # Overall project summary
@@ -109,6 +119,70 @@ All 13+ approaches to run LFM3 via VitisAI ExecutionProvider were attempted and 
 4. **No ONNX→xclbin pipeline** — xcompiler finds 0 ops in LFM3
 
 FastFlowLM v1.0.12 bypasses all of these by using its own `liblfm3_npu.so` engine directly with XRT.
+
+## Automation & Monitoring
+
+### Cron-based Watchdog (Auto-restart)
+
+The watchdog runs every 5 minutes via cron to auto-restart unresponsive servers and prevent CPU quality degradation after extended uptime:
+
+```bash
+# View crontab
+crontab -l
+
+# Manual watchdog run (restarts CPU if uptime > 24h)
+lfm3-npu watchdog --once --max-uptime-hours 24
+
+# Manual system diagnosis
+lfm3-npu doctor
+```
+
+Cron jobs:
+- `*/5 * * * *` — Watchdog (server health + CPU max-uptime restart)
+- `0 * * * *` — Doctor (system health diagnosis)
+- `@reboot` — Auto-start both servers on boot
+
+### Start All Servers
+
+```bash
+./start-all.sh start   # Start both CPU (1238) and NPU (1239) servers
+./start-all.sh stop    # Stop both servers
+./start-all.sh status  # Check both servers
+./start-all.sh restart # Restart both servers
+```
+
+### Real-time Monitoring Dashboard
+
+```bash
+lfm3-monitor
+```
+
+Refreshes every 5 seconds with color-coded server health, uptime, and decode metrics.
+
+### Quality Benchmark
+
+```bash
+python3 scripts/quality_benchmark.py --server both
+```
+
+Scores output quality 0-100 across arithmetic, factual, creative, explanation, and instruction test cases. NPU consistently scores ~97/100 vs CPU ~61/100.
+
+### Concurrency Stress Test
+
+```bash
+python3 scripts/concurrency_stress.py --server both --concurrency 4 --requests 20
+```
+
+Sends N concurrent requests and measures success rate, TTFT, decode speed, and degradation.
+
+### Log Rotation
+
+```bash
+# Copy logrotate config (requires root)
+sudo cp etc/logrotate-lfm3-npu.conf /etc/logrotate.d/lfm3-npu
+# Or run manually:
+logrotate -f etc/logrotate-lfm3-npu.conf
+```
 
 ## License
 

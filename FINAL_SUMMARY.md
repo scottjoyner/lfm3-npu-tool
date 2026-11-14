@@ -130,6 +130,9 @@ FastFlowLM v1.0.12 bypasses all of these by using its own `liblfm3_npu.so` engin
 ## Complete Tooling Suite (`/media/scott/data/lfm3-npu-tool/`)
 
 - **CLI** (`bin/lfm3-npu`): 13 commands — generate, server, bench, perf, health, convert, config, status, compare, compare-servers, doctor, watchdog, fleet-monitor
+- **Scripts** (`scripts/`): quality_benchmark.py, concurrency_stress.py, watchdog-cron.sh
+- **Utilities**: start-all.sh, lfm3-monitor, logrotate config
+- **Automation**: crontab (watchdog every 5 min, doctor hourly, auto-start on reboot)
 - **Python package** (`lib/lfm3_npu/`): ServerManager, Watchdog, benchmark, converter, compare, config, metrics
 - **Config** (`etc/lfm3-npu-config.yaml`): with performance tuning section
 - **Env setup** (`etc/lfm3-npu-env.sh`)
@@ -182,16 +185,31 @@ The AMD `libvaiml.so` crashes with SIGSEGV in protobuf descriptor registration d
 
 ## Verified Status
 
-- [x] CPU server running on port 1238 (~44k seconds uptime), full-quality when freshly started
+- [x] CPU server running on port 1238 (~55 min uptime), full-quality when freshly started
 - [x] NPU server running on port 1239 (FastFlowLM v1.0.12), full-quality LFM3-1.7B on NPU
 - [x] All 24 layers + LM head on NPU
 - [x] NPU produces clean output with reasoning traces (~27-32 tok/s decode)
-- [x] CPU server quality degrades after extended uptime (restart fixes it)
-- [x] CLI tooling: 12 commands, all verified working
+- [x] CPU server quality degrades after extended uptime (watchdog auto-restart prevents this)
+- [x] CLI tooling: 13 commands, all verified working
+- [x] Quality benchmark: NPU 97/100 vs CPU 61/100 (+36 point gap)
+- [x] Concurrency stress test: NPU handles concurrent requests cleanly, CPU degrades
 - [x] Systemd service files created (requires sudo to install)
+- [x] Cron automation: watchdog (5 min), doctor (hourly), auto-start on reboot
+- [x] Real-time monitoring dashboard (lfm3-monitor)
+- [x] Log rotation config
 - [x] Benchmark results documented in BENCHMARK_RESULTS.md
 - [x] Auto-finetune pipeline: 1089 passed, 3 skipped
 - [x] All documentation and installation scripts complete
+
+### Quality Benchmark Results (5 test cases)
+
+| Metric | CPU | NPU | Gap |
+|--------|-----|-----|-----|
+| Quality score | 61/100 | 97/100 | +36 points |
+| Decode speed | N/A | ~27 tok/s | — |
+| TTFT | N/A | ~0.18s | — |
+| Output quality | Garbled, repetitive | Clean, reasoned | NPU superior |
+
 
 ## Bottom Line
 
