@@ -297,6 +297,8 @@ def main():
                         help=f"Test prompt for duration measurement (default: '{DEFAULT_TEST_PROMPT}')")
     parser.add_argument("--max-samples", type=int, default=1000,
                         help="Max duration samples to keep (default: 1000)")
+    parser.add_argument("--interval", type=int, default=15,
+                        help="Scrape interval in seconds (default: 15)")
     parser.add_argument("--once", action="store_true",
                         help="Scrape once and exit (for testing)")
     args = parser.parse_args()

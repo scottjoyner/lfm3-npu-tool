@@ -6,8 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/tmp/flm serve lfm3:1.7b -p 1239 --host 127.0.0.1
-Restart=on-failure
+Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
 Environment=TMPDIR=/media/scott/data/tmp
 Environment=LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib
 Environment=XILINX_XRT=/opt/xilinx/xrt
