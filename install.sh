@@ -122,9 +122,19 @@ if [ -f "${TOOLING_DIR}/etc/logrotate-lfm3-npu.conf" ]; then
     echo "  Logrotate config: ${HOME}/.config/logrotate-lfm3-npu.conf"
 fi
 
+# Install monitoring configs
+echo ""
+echo "[7/8] Installing monitoring configs..."
+for cfg in etc/lfm3-npu-metrics.service etc/prometheus-lfm3.yml etc/prometheus-rules-lfm3-npu.yml etc/alertmanager-lfm3.yml etc/grafana-dashboard-lfm3-npu.json; do
+    if [ -f "${TOOLING_DIR}/${cfg}" ]; then
+        cp "${TOOLING_DIR}/${cfg}" "${HOME}/.config/${cfg}"
+        echo "  Installed: ${HOME}/.config/${cfg}"
+    fi
+done
+
 # Create symlinks
 echo ""
-echo "[7/8] Creating convenience symlinks..."
+echo "[8/8] Creating convenience symlinks..."
 for alias_name in lfm3-npu-gen lfm3-npu-bench lfm3-npu-convert lfm3-npu-doctor lfm3-npu-monitor; do
     ln -sf "$INSTALL_DIR/lfm3-npu" "$INSTALL_DIR/$alias_name" 2>/dev/null || true
 done

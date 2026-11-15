@@ -1,0 +1,29 @@
+# Alertmanager config for LFM3-1.7B alerts
+# Save as alertmanager.yml
+
+global:
+  smtp_smtp_host: 'localhost:25'
+  smtp_from: 'alertmanager@localhost'
+
+route:
+  group_by: ['alertname', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default'
+
+receivers:
+  - name: 'default'
+    email_configs:
+      - to: 'alerts@localhost'
+    slack_configs:
+      - channel: '#alerts'
+        title: 'LFM3-1.7B Alert: {{ .CommonLabels.alertname }}'
+        message: '{{ .CommonAnnotations.summary }}\n{{ .CommonAnnotations.description }}'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'service']

@@ -196,9 +196,39 @@ curl http://localhost:9190/metrics
 Exposes: `lfm3_npu_up`, `lfm3_npu_total_models`, `lfm3_npu_lfm3_model_available`,
 `lfm3_npu_process_cpu_percent`, `lfm3_npu_process_memory_rss_bytes`,
 `lfm3_npu_process_memory_vms_bytes`, `lfm3_npu_process_threads`,
-`lfm3_npu_request_duration_seconds`.
+`lfm3_npu_request_duration_seconds`, `lfm3_npu_requests_total`,
+`lfm3_npu_requests_errors_total`, `lfm3_npu_ttft_seconds`,
+`lfm3_npu_decode_tokens_per_second`, `lfm3_npu_uptime_seconds`,
+`lfm3_npu_in_warmup`, `lfm3_npu_last_request_duration`,
+`lfm3_npu_last_request_success`.
 
 Configure Prometheus to scrape: `http://localhost:9190/metrics`
+
+### Prometheus Alerting Rules
+
+Installed at `~/.config/prometheus-rules-lfm3-npu.yml`. Includes alerts for:
+- NPU server unreachable
+- LFM3 model unavailable
+- Request errors
+- Decode speed degraded
+- Memory high
+- Server restarted
+
+### Grafana Dashboard
+
+Installed at `~/.config/grafana-dashboard-lfm3-npu.json`. Includes panels for:
+- Server status, process CPU/memory/threads
+- Request count, errors, TTFT, decode speed
+- Request duration histogram
+- Exporter uptime, warmup status, last request duration/success
+
+### Prometheus Scrape Config
+
+Installed at `~/.config/prometheus-lfm3.yml`. Scrapes `localhost:9190/metrics`.
+
+### Alertmanager Config
+
+Installed at `~/.config/alertmanager-lfm3.yml`. Email and Slack alert routing.
 
 ### Operations Runbook
 

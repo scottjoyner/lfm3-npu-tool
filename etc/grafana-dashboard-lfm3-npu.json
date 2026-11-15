@@ -1,0 +1,257 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "lfm3-npu-inference",
+    "title": "LFM3-1.7B NPU Inference Dashboard",
+    "timezone": "utc",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "10s",
+    "tags": ["lfm3", "npu", "inference", "amd-strix-halo"],
+    "panels": [
+      {
+        "id": 1,
+        "title": "NPU Server Status",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 0, "y": 0},
+        "targets": [
+          {"expr": "lfm3_npu_up", "legendFormat": "NPU Server Up"},
+          {"expr": "lfm3_npu_lfm3_model_available", "legendFormat": "LFM3 Model Available"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "thresholdsMode": "absolute",
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 0}
+          ]
+        }
+      },
+      {
+        "id": 2,
+        "title": "NPU Process CPU %",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 4, "y": 0},
+        "targets": [
+          {"expr": "lfm3_npu_process_cpu_percent", "legendFormat": "CPU %"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "percent",
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 70},
+            {"color": "red", "value": 90}
+          ]
+        }
+      },
+      {
+        "id": 3,
+        "title": "NPU Process RSS Memory",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 8, "y": 0},
+        "targets": [
+          {"expr": "lfm3_npu_process_memory_rss_bytes / 1024 / 1024", "legendFormat": "RSS MB"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "bytes",
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 3000},
+            {"color": "red", "value": 4000}
+          ]
+        }
+      },
+      {
+        "id": 4,
+        "title": "NPU Process Threads",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 12, "y": 0},
+        "targets": [
+          {"expr": "lfm3_npu_process_threads", "legendFormat": "Threads"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""}
+        }
+      },
+      {
+        "id": 5,
+        "title": "Requests Total",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 0, "y": 3},
+        "targets": [
+          {"expr": "lfm3_npu_requests_total", "legendFormat": "Total Requests"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""}
+        }
+      },
+      {
+        "id": 6,
+        "title": "Request Errors",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 4, "y": 3},
+        "targets": [
+          {"expr": "lfm3_npu_requests_errors_total", "legendFormat": "Error Requests"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 1},
+            {"color": "red", "value": 5}
+          ]
+        }
+      },
+      {
+        "id": 7,
+        "title": "TTFT (Time to First Token)",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 8, "y": 3},
+        "targets": [
+          {"expr": "lfm3_npu_ttft_seconds", "legendFormat": "TTFT seconds"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "s",
+          "decimals": 3
+        }
+      },
+      {
+        "id": 8,
+        "title": "Decode Speed",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 12, "y": 3},
+        "targets": [
+          {"expr": "lfm3_npu_decode_tokens_per_second", "legendFormat": "Tok/s"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "rps",
+          "decimals": 1,
+          "thresholds": [
+            {"color": "red", "value": null},
+            {"color": "green", "value": 20}
+          ]
+        }
+      },
+      {
+        "id": 9,
+        "title": "Request Duration Histogram",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+        "targets": [
+          {"expr": "rate(lfm3_npu_request_duration_seconds_sum[5m]) / rate(lfm3_npu_request_duration_seconds_count[5m])", "legendFormat": "Avg Duration"},
+          {"expr": "lfm3_npu_ttft_seconds", "legendFormat": "TTFT"}
+        ],
+        "options": {
+          "legend": {"show": true, "asTable": true},
+          "tooltip": {"mode": "single"}
+        }
+      },
+      {
+        "id": 10,
+        "title": "Exporter Uptime",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 0, "y": 9},
+        "targets": [
+          {"expr": "lfm3_npu_uptime_seconds / 3600", "legendFormat": "Hours"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "h",
+          "decimals": 1
+        }
+      },
+      {
+        "id": 11,
+        "title": "In Warmup",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 4, "y": 9},
+        "targets": [
+          {"expr": "lfm3_npu_in_warmup", "legendFormat": "Warmup"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "thresholds": [
+            {"color": "green", "value": 0},
+            {"color": "yellow", "value": 1}
+          ]
+        }
+      },
+      {
+        "id": 12,
+        "title": "Last Request Duration",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 8, "y": 9},
+        "targets": [
+          {"expr": "lfm3_npu_last_request_duration", "legendFormat": "Last Duration (s)"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "s",
+          "decimals": 3
+        }
+      },
+      {
+        "id": 13,
+        "title": "Last Request Success",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 12, "y": 9},
+        "targets": [
+          {"expr": "lfm3_npu_last_request_success", "legendFormat": "Last Success"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "thresholds": [
+            {"color": "green", "value": 1},
+            {"color": "red", "value": 0}
+          ]
+        }
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]
+    },
+    "templating": {"list": []},
+    "annotations": {"list": []}
+  }
+}

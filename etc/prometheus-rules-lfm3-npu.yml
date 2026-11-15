@@ -1,0 +1,79 @@
+groups:
+  - name: lfm3-npu-inference
+    rules:
+      # NPU server is down
+      - alert: LFM3NPUServerDown
+        expr: lfm3_npu_up == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server is down"
+          description: "The NPU inference server on port 1239 has been unreachable for more than 30 seconds."
+
+      # NPU model not available
+      - alert: LFM3NPUModelUnavailable
+        expr: lfm3_npu_lfm3_model_available == 0
+        for: 60s
+        labels:
+          severity: critical
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B model not available on NPU server"
+          description: "The lfm3:1.7b model is not available on the NPU inference server."
+
+      # NPU request errors
+      - alert: LFM3NPURequestErrors
+        expr: rate(lfm3_npu_requests_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server returning errors"
+          description: "The NPU inference server has returned {{ $value }} errors per second over the last 5 minutes."
+
+      # NPU decode speed degraded
+      - alert: LFM3NPUDecodeSlow
+        expr: lfm3_npu_decode_tokens_per_second < 15 and lfm3_npu_up == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU decode speed degraded"
+          description: "NPU decode speed is {{ $value }} tok/s, below the 15 tok/s threshold."
+
+      # NPU process memory high
+      - alert: LFM3NPUMemoryHigh
+        expr: lfm3_npu_process_memory_rss_bytes / 1024 / 1024 > 3500
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server memory high"
+          description: "NPU server RSS memory is {{ $value }} MB, above 3500 MB threshold."
+
+      # NPU server restarts detected
+      - alert: LFM3NPUServerRestarted
+        expr: changes(lfm3_npu_uptime_seconds[1h]) < 0
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server restarted"
+          description: "The NPU inference server uptime has reset, indicating a restart."
+
+      # CPU server down
+      - alert: LFM3CPUServerDown
+        expr: up{job="lfm3-cpu"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server is down"
+          description: "The CPU inference server on port 1238 has been unreachable for more than 30 seconds."

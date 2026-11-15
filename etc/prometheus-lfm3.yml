@@ -1,0 +1,11 @@
+# Prometheus scrape config for LFM3-1.7B inference servers
+# Save as prometheus-lfm3.yml and add to your prometheus config
+
+scrape_configs:
+  - job_name: 'lfm3-inference'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9190']
+        labels:
+          server: 'npu-metrics'
+          provider: 'fastflowlm'
