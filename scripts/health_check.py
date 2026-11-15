@@ -101,6 +101,10 @@ def main():
         "--json", action="store_true",
         help="Output JSON format"
     )
+    parser.add_argument(
+        "--aggregate", action="store_true",
+        help="Output unified aggregate status (overall healthy + per-server summary)"
+    )
     args = parser.parse_args()
 
     servers = ["cpu", "npu"] if args.server == "both" else [args.server]
@@ -119,6 +123,10 @@ def main():
         }
         print(json.dumps(output, indent=2))
         all_healthy = output["healthy"]
+    elif args.aggregate:
+        agg = aggregate_status(results)
+        print(json.dumps(agg, indent=2))
+        all_healthy = agg["healthy"]
     else:
         all_healthy = True
         for r in results:
@@ -133,6 +141,52 @@ def main():
         sys.exit(1)
 
     sys.exit(0 if all_healthy else 1)
+
+
+def aggregate_status(results: list[dict]) -> dict:
+    """Build aggregate status from per-server results."""
+    all_healthy = all(r["healthy"] for r in results)
+    total_models = 0
+    total_uptime = 0
+    total_decode_ms = 0
+    cpu_info = {}
+    npu_info = {}
+
+    for r in results:
+        details = r.get("details", {})
+        if r["server"] == "cpu":
+            cpu_info = {
+                "provider": details.get("provider", "unknown"),
+                "model": details.get("model", "unknown"),
+                "uptime_seconds": details.get("uptime_seconds", 0),
+                "avg_decode_ms": details.get("avg_decode_ms", 0),
+                "active_slots": details.get("active_slots", 0),
+                "free_slots": details.get("free_slots", 0),
+                "port": details.get("port", 1238),
+            }
+            total_uptime = details.get("uptime_seconds", 0)
+            total_decode_ms = details.get("avg_decode_ms", 0)
+        elif r["server"] == "npu":
+            npu_info = {
+                "provider": details.get("provider", "unknown"),
+                "total_models": details.get("total_models", 0),
+                "lfm3_models": details.get("lfm3_models", []),
+                "port": details.get("port", 1239),
+            }
+            total_models = details.get("total_models", 0)
+
+    return {
+        "healthy": all_healthy,
+        "servers": len(results),
+        "healthy_servers": sum(1 for r in results if r["healthy"]),
+        "cpu": cpu_info,
+        "npu": npu_info,
+        "summary": {
+            "total_models": total_models,
+            "uptime_seconds": total_uptime,
+            "avg_decode_ms": total_decode_ms,
+        },
+    }
 
 
 if __name__ == "__main__":

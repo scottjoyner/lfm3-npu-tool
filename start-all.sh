@@ -1,37 +1,12 @@
 #!/bin/bash
 # =============================================================================
 # LFM3-1.7B Dual-Server Startup Script
-# Starts both CPU (port 1238) and NPU (port 1239) inference servers.
+# Starts both CPU (port 1238) and NPU (port 1239) inference servers via systemd --user.
 # =============================================================================
 
 set -euo pipefail
 
 TOOL_DIR="/media/scott/data/lfm3-npu-tool"
-ENV_FILE="${TOOL_DIR}/etc/lfm3-npu-env.sh"
-
-# Source environment if available
-if [[ -f "${ENV_FILE}" ]]; then
-    source "${ENV_FILE}"
-fi
-
-# Default environment (overrides from env file)
-export LD_LIBRARY_PATH="/tmp/lib:/opt/xilinx/xrt/lib:${LD_LIBRARY_PATH:-}"
-export XILINX_XRT="${XILINX_XRT:-/opt/xilinx/xrt}"
-export FLM_MODEL_PATH="${FLM_MODEL_PATH:-/home/scott/.config/flm/models}"
-export TMPDIR="${TMPDIR:-/media/scott/data/tmp}"
-export XLNX_CACHE_DIR="${XLNX_CACHE_DIR:-/media/scott/data/vitisai_cache}"
-
-CPU_PYTHON="/media/scott/data/ryzen-ai-venv/bin/python"
-CPU_SERVER="${TOOL_DIR}/lib/lfm3_npu/cpu_batched_server.py"
-NPU_BINARY="/tmp/flm"
-
-CPU_PORT="${CPU_PORT:-1238}"
-NPU_PORT="${NPU_PORT:-1239}"
-NPU_HOST="${NPU_HOST:-127.0.0.1}"
-
-PID_DIR="${TOOL_DIR}/var/run"
-LOG_DIR="${TOOL_DIR}/var/log"
-mkdir -p "${PID_DIR}" "${LOG_DIR}"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -54,105 +29,103 @@ wait_for_port() {
 }
 
 start_cpu() {
-    log "Starting CPU server on port ${CPU_PORT}..."
-    if [[ -f "${PID_DIR}/cpu.pid" ]]; then
-        local old_pid=$(cat "${PID_DIR}/cpu.pid" 2>/dev/null || echo "")
-        if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
-            log "CPU server already running (PID ${old_pid})"
-            return 0
-        fi
+    log "Starting CPU server on port 1238 via systemd..."
+    if systemctl --user is-active --quiet lfm3-npu-cpu.service 2>/dev/null; then
+        log "CPU server already running"
+        return 0
     fi
-
-    nohup "${CPU_PYTHON}" -B "${CPU_SERVER}" --host 0.0.0.0 --port "${CPU_PORT}" \
-        > "${LOG_DIR}/cpu.log" 2>&1 &
-    echo $! > "${PID_DIR}/cpu.pid"
-
-    if wait_for_port "${CPU_PORT}" "0.0.0.0"; then
-        log "CPU server ready on port ${CPU_PORT} (PID $(cat ${PID_DIR}/cpu.pid))"
+    systemctl --user start lfm3-npu-cpu.service 2>/dev/null || {
+        log "ERROR: Failed to start CPU server via systemd"
+        return 1
+    }
+    if wait_for_port 1238 "0.0.0.0"; then
+        log "CPU server ready on port 1238"
     else
-        log "WARNING: CPU server may still be initializing. Check ${LOG_DIR}/cpu.log"
+        log "WARNING: CPU server may still be initializing. Check: journalctl --user -u lfm3-npu-cpu.service"
     fi
 }
 
 start_npu() {
-    log "Starting NPU (FastFlowLM) server on port ${NPU_PORT}..."
-    if [[ ! -x "${NPU_BINARY}" ]]; then
-        log "ERROR: FLM binary not found or not executable: ${NPU_BINARY}"
+    log "Starting NPU (FastFlowLM) server on port 1239 via systemd..."
+    if [[ ! -x /tmp/flm ]]; then
+        log "ERROR: FLM binary not found or not executable: /tmp/flm"
         log "  Download from: https://github.com/ROCm/FastFlowLM/releases/tag/v1.0.12"
         return 1
     fi
-
-    if [[ -f "${PID_DIR}/npu.pid" ]]; then
-        local old_pid=$(cat "${PID_DIR}/npu.pid" 2>/dev/null || echo "")
-        if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
-            log "NPU server already running (PID ${old_pid})"
-            return 0
-        fi
+    if systemctl --user is-active --quiet lfm3-npu-npu.service 2>/dev/null; then
+        log "NPU server already running"
+        return 0
     fi
-
-    nohup env LD_LIBRARY_PATH="/tmp/lib:/opt/xilinx/xrt/lib:${LD_LIBRARY_PATH:-}" \
-        XILINX_XRT="/opt/xilinx/xrt" \
-        FLM_MODEL_PATH="/home/scott/.config/flm/models" \
-        "${NPU_BINARY}" serve lfm3:1.7b -p "${NPU_PORT}" --host "${NPU_HOST}" \
-        > "${LOG_DIR}/npu.log" 2>&1 &
-    echo $! > "${PID_DIR}/npu.pid"
-
-    if wait_for_port "${NPU_PORT}" "${NPU_HOST}"; then
-        log "NPU server ready on port ${NPU_PORT} (PID $(cat ${PID_DIR}/npu.pid))"
+    systemctl --user start lfm3-npu-npu.service 2>/dev/null || {
+        log "ERROR: Failed to start NPU server via systemd"
+        return 1
+    }
+    if wait_for_port 1239 "127.0.0.1"; then
+        log "NPU server ready on port 1239"
     else
-        log "WARNING: NPU server may still be initializing. Check ${LOG_DIR}/npu.log"
+        log "WARNING: NPU server may still be initializing. Check: journalctl --user -u lfm3-npu-npu.service"
+    fi
+}
+
+start_metrics() {
+    log "Starting NPU metrics exporter on port 9190 via systemd..."
+    if systemctl --user is-active --quiet lfm3-npu-metrics.service 2>/dev/null; then
+        log "Metrics exporter already running"
+        return 0
+    fi
+    systemctl --user start lfm3-npu-metrics.service 2>/dev/null || {
+        log "ERROR: Failed to start metrics exporter via systemd"
+        return 1
+    }
+    if wait_for_port 9190 "0.0.0.0"; then
+        log "Metrics exporter ready on port 9190"
+    else
+        log "WARNING: Metrics exporter may still be initializing. Check: journalctl --user -u lfm3-npu-metrics.service"
     fi
 }
 
 status() {
     log "=== Server Status ==="
-    for srv in cpu npu; do
-        if [[ -f "${PID_DIR}/${srv}.pid" ]]; then
-            local pid=$(cat "${PID_DIR}/${srv}.pid")
-            if kill -0 "${pid}" 2>/dev/null; then
-                log "${srv^} server: RUNNING (PID ${pid})"
-            else
-                log "${srv^} server: NOT RUNNING (stale PID file)"
-            fi
+    for svc in lfm3-npu-cpu.service lfm3-npu-npu.service lfm3-npu-metrics.service; do
+        local name=$(basename "${svc}" .service)
+        if systemctl --user is-active --quiet "${svc}" 2>/dev/null; then
+            log "${name}: RUNNING"
         else
-            log "${srv^} server: NOT RUNNING"
+            log "${name}: NOT RUNNING"
         fi
     done
     log ""
-    log "CPU health: $(curl -s --max-time 3 http://0.0.0.0:${CPU_PORT}/health 2>/dev/null || echo 'unreachable')"
-    local npu_models=$(curl -s --max-time 3 "http://${NPU_HOST}:${NPU_PORT}/v1/models" 2>/dev/null || echo '')
+    log "CPU health: $(curl -s --max-time 3 http://0.0.0.0:1238/health 2>/dev/null || echo 'unreachable')"
+    local npu_models=$(curl -s --max-time 3 "http://127.0.0.1:1239/v1/models" 2>/dev/null || echo '')
     if [[ -n "${npu_models}" ]]; then
         local npu_lfm=$(echo "${npu_models}" | python3 -c "import sys,json; d=json.load(sys.stdin); lfm=[m for m in d['data'] if 'lfm3' in m['id']]; print(lfm[0]['id'] if lfm else 'not found')" 2>/dev/null || echo 'parse error')
         log "NPU models: ${npu_lfm}"
     else
         log "NPU models: unreachable"
     fi
+    local metrics=$(curl -s --max-time 3 http://0.0.0.0:9190/metrics 2>/dev/null | head -1 || echo 'unreachable')
+    log "Metrics: ${metrics}"
 }
 
 case "${1:-start}" in
     start)
         start_cpu
         start_npu
+        start_metrics
         log ""
-        log "=== Both servers started ==="
-        log "  CPU server:  http://0.0.0.0:${CPU_PORT}"
-        log "  NPU server:  http://${NPU_HOST}:${NPU_PORT}"
+        log "=== All servers started ==="
+        log "  CPU server:   http://0.0.0.0:1238"
+        log "  NPU server:   http://127.0.0.1:1239"
+        log "  Metrics:      http://0.0.0.0:9190/metrics"
         ;;
     stop)
         log "Stopping CPU server..."
-        if [[ -f "${PID_DIR}/cpu.pid" ]]; then
-            local pid=$(cat "${PID_DIR}/cpu.pid")
-            kill "${pid}" 2>/dev/null || true
-            rm -f "${PID_DIR}/cpu.pid"
-            log "CPU server stopped."
-        fi
+        systemctl --user stop lfm3-npu-cpu.service 2>/dev/null || true
         log "Stopping NPU server..."
-        if [[ -f "${PID_DIR}/npu.pid" ]]; then
-            local pid=$(cat "${PID_DIR}/npu.pid")
-            kill "${pid}" 2>/dev/null || true
-            rm -f "${PID_DIR}/npu.pid"
-            log "NPU server stopped."
-        fi
+        systemctl --user stop lfm3-npu-npu.service 2>/dev/null || true
+        log "Stopping metrics exporter..."
+        systemctl --user stop lfm3-npu-metrics.service 2>/dev/null || true
+        log "All servers stopped."
         ;;
     restart)
         "$0" stop
@@ -162,8 +135,14 @@ case "${1:-start}" in
     status)
         status
         ;;
+    enable)
+        log "Enabling services for boot..."
+        systemctl --user enable lfm3-npu-cpu.service lfm3-npu-npu.service lfm3-npu-metrics.service 2>/dev/null || true
+        systemctl --user enable lfm3-npu-watchdog.timer lfm3-npu-doctor.timer lfm3-npu-health.timer 2>/dev/null || true
+        log "Services enabled for boot."
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status}"
+        echo "Usage: $0 {start|stop|restart|status|enable}"
         exit 1
         ;;
 esac
