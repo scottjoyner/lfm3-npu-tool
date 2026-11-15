@@ -58,6 +58,14 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_npu_ttft_seconds gauge
 # HELP lfm3_npu_decode_tokens_per_second Decode speed in tokens/sec
 # TYPE lfm3_npu_decode_tokens_per_second gauge
+# HELP lfm3_npu_uptime_seconds Exporter uptime in seconds
+# TYPE lfm3_npu_uptime_seconds gauge
+# HELP lfm3_npu_in_warmup Whether exporter is in warmup period (errors not counted)
+# TYPE lfm3_npu_in_warmup gauge
+# HELP lfm3_npu_last_request_duration Last test request duration in seconds
+# TYPE lfm3_npu_last_request_duration gauge
+# HELP lfm3_npu_last_request_success Whether last test request succeeded
+# TYPE lfm3_npu_last_request_success gauge
 """
 
 
@@ -66,11 +74,14 @@ class MetricsCollector:
 
     def __init__(self, npu_port: int, npu_host: str = "127.0.0.1",
                  test_prompt: str = DEFAULT_TEST_PROMPT,
-                 max_duration_samples: int = 1000):
+                 max_duration_samples: int = 1000,
+                 warmup_seconds: int = 30):
         self.npu_port = npu_port
         self.npu_host = npu_host
         self.test_prompt = test_prompt
         self.max_duration_samples = max_duration_samples
+        self.warmup_seconds = warmup_seconds
+        self._start_time = time.time()
         self._lock = threading.Lock()
         self._durations: list[float] = []
         self._ttfts: list[float] = []
@@ -79,6 +90,8 @@ class MetricsCollector:
         self._requests_errors = 0
         self._last_ttft = 0.0
         self._last_decode_tps = 0.0
+        self._last_duration = 0.0
+        self._last_success = False
 
     def fetch_json(self, url: str, timeout: float = 10.0):
         """Fetch JSON from URL, return None on failure."""
@@ -152,21 +165,17 @@ class MetricsCollector:
 
     def scrape(self) -> dict:
         """Scrape all available metrics from the NPU server."""
-        with self._lock:
-            durations = list(self._durations)
-            ttfts = list(self._ttfts)
-            decodes = list(self._decodes)
-            requests_total = self._requests_total
-            requests_errors = self._requests_errors
-            last_ttft = self._last_ttft
-            last_decode_tps = self._last_decode_tps
+        elapsed = time.time() - self._start_time
+        in_warmup = elapsed < self.warmup_seconds
 
         # Send a test request to measure real duration
         test_result = self.send_test_request()
         with self._lock:
             self._requests_total += 1
+            # During warmup, don't count errors (NPU server may still be starting)
             if not test_result["success"]:
-                self._requests_errors += 1
+                if not in_warmup:
+                    self._requests_errors += 1
             else:
                 self._durations.append(test_result["duration"])
                 self._ttfts.append(test_result["ttft"])
@@ -181,6 +190,8 @@ class MetricsCollector:
                 # Update last values
                 self._last_ttft = test_result["ttft"]
                 self._last_decode_tps = test_result["decode_tps"]
+                self._last_duration = test_result["duration"]
+                self._last_success = True
 
             # Re-read after update
             durations = list(self._durations)
@@ -190,6 +201,8 @@ class MetricsCollector:
             requests_errors = self._requests_errors
             last_ttft = self._last_ttft
             last_decode_tps = self._last_decode_tps
+            last_duration = self._last_duration
+            last_success = self._last_success
 
         # Check /v1/models
         models_data = self.fetch_json(
@@ -235,8 +248,10 @@ class MetricsCollector:
             "requests_errors": requests_errors,
             "last_ttft": last_ttft,
             "last_decode_tps": last_decode_tps,
-            "last_duration": test_result["duration"],
-            "last_success": test_result["success"],
+            "last_duration": last_duration,
+            "last_success": last_success,
+            "uptime_seconds": elapsed,
+            "in_warmup": in_warmup,
         }
 
 
@@ -255,6 +270,10 @@ def format_prometheus(metrics: dict) -> str:
     lines.append(f'lfm3_npu_process_threads {metrics["process_threads"]}')
     lines.append(f'lfm3_npu_ttft_seconds {metrics["last_ttft"]}')
     lines.append(f'lfm3_npu_decode_tokens_per_second {metrics["last_decode_tps"]}')
+    lines.append(f'lfm3_npu_uptime_seconds {metrics["uptime_seconds"]}')
+    lines.append(f'lfm3_npu_in_warmup {1 if metrics["in_warmup"] else 0}')
+    lines.append(f'lfm3_npu_last_request_duration {metrics["last_duration"]}')
+    lines.append(f'lfm3_npu_last_request_success {1 if metrics["last_success"] else 0}')
 
     # Request duration histogram
     durations = metrics["durations"]
