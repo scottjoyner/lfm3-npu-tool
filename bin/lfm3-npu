@@ -24,6 +24,7 @@ Commands:
     version-check   Check for FastFlowLM version updates
     benchmark-cron  Run benchmark cron job (periodic performance validation)
     validate        Run startup validation of all LFM3 services
+    recover         Recover all LFM3 servers (stop, start, wait for health)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -45,6 +46,7 @@ Examples:
     lfm3-npu version-check --upgrade # Show upgrade instructions
     lfm3-npu benchmark-cron          # Run periodic benchmark
     lfm3-npu validate                # Validate all services after boot
+    lfm3-npu recover                 # Recover all servers (stop, start, verify)
 """
 
 import argparse
@@ -479,6 +481,95 @@ def cmd_validate(args) -> int:
     print("Running startup validation...", flush=True)
     result = subprocess.run(["python3", script], capture_output=False)
     return result.returncode
+
+
+def cmd_recover(args) -> int:
+    """Recover all LFM3 servers (stop, start, wait for health)."""
+    import subprocess
+    import time
+
+    print("=" * 60)
+    print("LFM3-1.7B Server Recovery")
+    print("=" * 60)
+
+    # Stop all services
+    print("\n[1/4] Stopping all LFM3 services...")
+    for svc in ["lfm3-npu-cpu.service", "lfm3-npu-npu.service",
+                "lfm3-npu-metrics.service", "lfm3-npu-quality-monitor.service"]:
+        result = subprocess.run(
+            ["systemctl", "--user", "stop", svc],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print(f"  Stopped: {svc}")
+        else:
+            print(f"  Warning: could not stop {svc}: {result.stderr.strip()}")
+
+    # Wait for processes to fully stop
+    print("  Waiting for processes to stop...")
+    time.sleep(5)
+
+    # Kill any remaining processes
+    subprocess.run(["pkill", "-f", "flm serve"], capture_output=True, timeout=10)
+    subprocess.run(["pkill", "-f", "cpu_batched_server"], capture_output=True, timeout=10)
+    subprocess.run(["pkill", "-f", "npu_metrics_exporter"], capture_output=True, timeout=10)
+    subprocess.run(["pkill", "-f", "quality_monitor"], capture_output=True, timeout=10)
+    time.sleep(2)
+
+    # Start all services
+    print("\n[2/4] Starting all LFM3 services...")
+    for svc in ["lfm3-npu-cpu.service", "lfm3-npu-npu.service",
+                "lfm3-npu-metrics.service", "lfm3-npu-quality-monitor.service"]:
+        result = subprocess.run(
+            ["systemctl", "--user", "start", svc],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print(f"  Started: {svc}")
+        else:
+            print(f"  Failed to start {svc}: {result.stderr.strip()}")
+            return 1
+
+    # Wait for services to become healthy
+    print("\n[3/4] Waiting for services to become healthy...")
+    import urllib.request
+    import json
+
+    def fetch_json(url, timeout=5):
+        try:
+            req = urllib.request.urlopen(url, timeout=timeout)
+            return json.loads(req.read().decode("utf-8")), None
+        except Exception as e:
+            return None, str(e)
+
+    healthy = True
+    for i in range(12):  # Wait up to 60 seconds
+        cpu_ok, _ = fetch_json("http://127.0.0.1:1238/health", timeout=3)
+        npu_ok, _ = fetch_json("http://127.0.0.1:1239/v1/models", timeout=3)
+        if cpu_ok and npu_ok:
+            print(f"  All services healthy after {i * 5}s")
+            break
+        print(f"  Waiting... ({i * 5}s)")
+        time.sleep(5)
+    else:
+        print("  Services did not become healthy in time")
+        healthy = False
+
+    # Run final validation
+    print("\n[4/4] Running validation...")
+    script = os.path.join(SERVER_DIR, "scripts", "startup-validate.py")
+    if os.path.exists(script):
+        result = subprocess.run(["python3", script], capture_output=False)
+        if result.returncode != 0:
+            healthy = False
+
+    print("\n" + "=" * 60)
+    if healthy:
+        print("RECOVERY COMPLETE: All servers restored and healthy")
+        return 0
+    else:
+        print("RECOVERY INCOMPLETE: Some servers may still be unhealthy")
+        return 1
 
 
 def cmd_generate(args) -> int:
@@ -1336,6 +1427,11 @@ def main() -> int:
         "validate", help="Run startup validation of all LFM3 services"
     )
     validate_parser.set_defaults(func=cmd_validate)
+
+    recover_parser = subparsers.add_parser(
+        "recover", help="Recover all LFM3 servers (stop, start, wait for health)"
+    )
+    recover_parser.set_defaults(func=cmd_recover)
 
     args = parser.parse_args()
 

@@ -5,25 +5,34 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Ryzen AI SDK dependencies
-WORKDIR /opt
-COPY ryzen-ai-venv /media/scott/data/ryzen-ai-venv
+# Create directories
+RUN mkdir -p /media/scott/data/tmp /media/scott/data/lfm3-npu-tool \
+    /home/scott/.config/flm/models/LFM3-1.7B-NPU2 \
+    /home/scott/.config/systemd/user
 
 # Set environment
 ENV TMPDIR=/media/scott/data/tmp
-ENV LD_LIBRARY_PATH="/media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/flexml/flexml_extras/lib:/media/scott/data/ryzen-ai-venv/lib/python3.12/site-packages/voe/lib:/opt/xilinx/xrt/lib"
+ENV LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib
+ENV XILINX_XRT=/opt/xilinx/xrt
+ENV FLM_MODEL_PATH=/home/scott/.config/flm/models
+ENV PATH=/opt/xilinx/xrt/bin:/usr/bin:/bin
 ENV PYTHONPATH=/media/scott/data/lfm3-npu-tool/lib
 
 # Copy tooling
 COPY . /media/scott/data/lfm3-npu-tool/
 
 # Install Python dependencies
-RUN pip3 install fastapi uvicorn onnxruntime onnxruntime-genai tokenizers numpy pydantic psutil
+RUN pip3 install fastapi uvicorn onnxruntime tokenizers numpy pydantic psutil psutil yaml
+
+# Copy FLM binary and NPU engine (built separately)
+COPY --from=build /tmp/flm /tmp/flm
+COPY --from=build /tmp/lib/liblfm3_npu.so /tmp/lib/liblfm3_npu.so
 
 # Expose ports
-EXPOSE 1238 1239
+EXPOSE 1238 1239 9190
 
-# Default command: start CPU server
-CMD ["/media/scott/data/ryzen-ai-venv/bin/python", "/media/scott/data/lfm3-npu-tool/lib/lfm3_npu/cpu_server.py", "--host", "0.0.0.0", "--port", "1238"]
+# Default command: start all services
+CMD ["/media/scott/data/lfm3-npu-tool/start-all.sh", "start"]

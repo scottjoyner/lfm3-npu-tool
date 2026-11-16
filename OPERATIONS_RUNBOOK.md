@@ -236,3 +236,220 @@ Keeps 7 daily rotations, 4 weekly rotations, compressed.
 3. Both down → `./start-all.sh start`
 4. NPU hardware issues → Check `xrt-smi examine`, verify `/dev/accel0`
 5. Persistent issues → Check `lfm3-npu doctor` output
+
+## Recovery Procedures
+
+### Full Server Recovery
+
+If both servers are down or unhealthy, use the recover command:
+
+```bash
+# Stop all services, start them, wait for health, and validate
+lfm3-npu recover
+```
+
+This will:
+1. Stop all LFM3 services (CPU, NPU, metrics, quality monitor)
+2. Kill any remaining processes
+3. Start all services in order
+4. Wait up to 60 seconds for servers to become healthy
+5. Run startup validation
+
+### Individual Server Recovery
+
+```bash
+# Recover CPU server only
+lfm3-npu server restart cpu
+
+# Recover NPU server only
+lfm3-npu server restart npu
+
+# Recover metrics exporter
+systemctl --user restart lfm3-npu-metrics.service
+
+# Recover quality monitor
+systemctl --user restart lfm3-npu-quality-monitor.service
+```
+
+## Quality Monitor
+
+The quality monitor continuously checks generation quality on both servers
+and auto-restarts when degradation is detected.
+
+### Features
+
+- **Quality degradation detection**: Conversation loops, numbered list explosions,
+  repeated characters, wrong math answers
+- **NPU reasoning trace detection**: Verifies NPU produces reasoning_content (Qwen XML format)
+- **Server unreachable detection**: Restarts servers that stop responding to health endpoints
+- **Restart cooldown**: Prevents restart loops (default 120s between restarts)
+- **State file**: `/media/scott/data/lfm3-npu-tool/var/log/quality-monitor-state.json`
+  tracks restart counts and check statistics
+
+### Manual Quality Check
+
+```bash
+# One-shot check with auto-restart
+lfm3-npu quality-monitor --once --fix --verbose
+
+# Run continuously with auto-restart
+lfm3-npu quality-monitor --fix --verbose
+```
+
+## Disk Monitoring
+
+Disk usage is monitored via Prometheus metrics:
+
+- `lfm3_disk_used_percent` — overall disk usage percentage
+- Alerts trigger at 85% (warning) and 95% (critical)
+
+Use `/media/scott/data` for large files (avoid /tmp which has 15G quota).
+
+## Startup Validation
+
+Validates all services after boot:
+
+```bash
+lfm3-npu validate
+```
+
+Checks systemd services, timers, server health, metrics exporter, NPU generation
+quality, and disk space. Runs automatically via systemd timer at boot (1min delay).
+
+## Prometheus Alerts
+
+The following alerts are configured in `etc/prometheus-rules-lfm3-npu.yml`:
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| LFM3NPUServerDown | NPU unreachable 30s | critical |
+| LFM3NPUModelUnavailable | lfm3 model missing 60s | critical |
+| LFM3NPURequestErrors | Error rate > 0 for 5m | warning |
+| LFM3NPUDecodeSlow | Decode < 15 tok/s for 5m | warning |
+| LFM3NPUMemoryHigh | RSS > 3500 MB for 5m | warning |
+| LFM3NPUServerRestarted | Uptime reset in 1h | warning |
+| LFM3CPUServerDown | CPU unreachable 30s | critical |
+| LFM3CPUDecodeSlow | Avg decode > 200ms for 5m | warning |
+| LFM3CPUUptimeHigh | Uptime > 7200s | warning |
+| LFM3CPUOverloaded | Free slots = 0 for 5m | warning |
+| LFM3DiskUsageHigh | Disk > 85% for 5m | warning |
+| LFM3DiskUsageCritical | Disk > 95% for 2m | critical |
+| LFM3NPUUnresponsiveRestarts | NPU restarted by QM in 1h | warning |
+| LFM3CPUUnresponsiveRestarts | CPU restarted by QM in 1h | warning |
+
+## Systemd User Services
+
+| Service | Description |
+|---------|-------------|
+| lfm3-npu-cpu.service | CPU inference server (port 1238) |
+| lfm3-npu-npu.service | NPU inference server (port 1239) |
+| lfm3-npu-metrics.service | Prometheus metrics exporter (port 9190) |
+| lfm3-npu-quality-monitor.service | Quality monitor with auto-restart |
+
+| Timer | Schedule | Purpose |
+|-------|----------|---------|
+| lfm3-npu-health.timer | Every 1 min | Unified health check |
+| lfm3-npu-watchdog.timer | Every 5 min | Server responsiveness + CPU uptime |
+| lfm3-npu-doctor.timer | Hourly | Full system diagnosis |
+| lfm3-npu-quality-monitor.timer | Every 5 min | Quality degradation detection |
+| lfm3-npu-benchmark.timer | Hourly | Performance benchmarking |
+| lfm3-npu-startup-validate.timer | Boot + 1min | Post-boot validation |
+
+### Enable all services:
+
+```bash
+systemctl --user enable lfm3-npu-cpu.service
+systemctl --user enable lfm3-npu-npu.service
+systemctl --user enable lfm3-npu-metrics.service
+systemctl --user enable lfm3-npu-quality-monitor.service
+systemctl --user enable lfm3-npu-health.timer
+systemctl --user enable lfm3-npu-watchdog.timer
+systemctl --user enable lfm3-npu-doctor.timer
+systemctl --user enable lfm3-npu-quality-monitor.timer
+systemctl --user enable lfm3-npu-benchmark.timer
+systemctl --user enable lfm3-npu-startup-validate.timer
+```
+
+## Metrics Exporter (Port 9190)
+
+Exposes Prometheus metrics:
+
+- `lfm3_npu_up` — NPU server reachable
+- `lfm3_npu_total_models` — total models available
+- `lfm3_npu_lfm3_model_available` — lfm3:1.7b available
+- `lfm3_npu_process_cpu_percent` — NPU server CPU %
+- `lfm3_npu_process_memory_rss_bytes` — NPU server RSS memory
+- `lfm3_npu_process_memory_vms_bytes` — NPU server VMS memory
+- `lfm3_npu_process_threads` — NPU server thread count
+- `lfm3_npu_request_duration_seconds` — request duration histogram
+- `lfm3_npu_ttft_seconds` — time to first token
+- `lfm3_npu_decode_tokens_per_second` — decode speed
+- `lfm3_npu_uptime_seconds` — exporter uptime
+- `lfm3_cpu_up` — CPU server reachable
+- `lfm3_cpu_uptime_seconds` — CPU server uptime
+- `lfm3_cpu_avg_decode_ms` — CPU avg decode time
+- `lfm3_cpu_active_slots` — CPU active request slots
+- `lfm3_cpu_free_slots` — CPU free request slots
+- `lfm3_disk_total_bytes` — total disk space
+- `lfm3_disk_used_bytes` — used disk space
+- `lfm3_disk_free_bytes` — free disk space
+- `lfm3_disk_used_percent` — disk usage %
+- `lfm3_qm_cpu_restarts` — CPU restarts by quality monitor
+- `lfm3_qm_npu_restarts` — NPU restarts by quality monitor
+- `lfm3_qm_npu_unresponsive_restarts` — NPU unresponsive restarts
+- `lfm3_qm_last_check` — last QM check timestamp
+- `lfm3_qm_cpu_passed` — CPU quality checks passed
+- `lfm3_qm_cpu_total` — total CPU quality checks
+- `lfm3_qm_npu_passed` — NPU quality checks passed
+- `lfm3_qm_npu_total` — total NPU quality checks
+
+Configure Prometheus to scrape: `http://localhost:9190/metrics`
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `lfm3-npu generate` | Generate text via HTTP API |
+| `lfm3-npu server` | Start/stop/restart/check servers |
+| `lfm3-npu bench` | Benchmark inference performance |
+| `lfm3-npu perf` | Performance profiling across concurrency |
+| `lfm3-npu health` | Check server health |
+| `lfm3-npu convert` | Convert model to NPU-compatible format |
+| `lfm3-npu config` | Show configuration |
+| `lfm3-npu status` | Show system status |
+| `lfm3-npu compare` | Compare CPU vs NPU inference |
+| `lfm3-npu compare-servers` | Compare live CPU vs NPU via HTTP |
+| `lfm3-npu doctor` | Diagnose system health (--fix to auto-repair) |
+| `lfm3-npu watchdog` | Run server watchdog |
+| `lfm3-npu fleet-monitor` | Fleet monitoring |
+| `lfm3-npu smoke-test` | Validate all servers (--verbose, --fix) |
+| `lfm3-npu quality-monitor` | Monitor quality with auto-restart (--once, --fix, --verbose) |
+| `lfm3-npu benchmark-cron` | Run periodic benchmark |
+| `lfm3-npu version-check` | Check FastFlowLM updates (--upgrade to install) |
+| `lfm3-npu validate` | Run startup validation |
+| `lfm3-npu recover` | Recover all servers (stop, start, verify) |
+
+## File Locations
+
+| Path | Purpose |
+|------|---------|
+| `/tmp/flm` | FLM v1.0.12 binary |
+| `/tmp/lib/liblfm3_npu.so` | LFM3 NPU engine library |
+| `/home/scott/.config/flm/models/LFM3-1.7B-NPU2/` | FLM model files |
+| `/media/scott/data/lfm3_oga_export/model.onnx` | CPU ONNX model |
+| `/media/scott/data/lfm3-npu-tool/` | Tooling repository |
+| `/media/scott/data/lfm3-npu-tool/var/log/` | Server logs |
+| `/media/scott/data/lfm3-npu-tool/var/log/quality-monitor-state.json` | QM state for metrics |
+| `/media/scott/data/lfm3-npu-tool/var/run/` | PID files |
+| `/home/scott/.config/systemd/user/` | User systemd services |
+| `/home/scott/.config/lfm3-npu/config.yaml` | Tooling configuration |
+
+## Emergency Contacts / Escalation
+
+1. CPU server degraded → `lfm3-npu server restart cpu` (or wait for quality monitor)
+2. NPU server down → `lfm3-npu server restart npu`
+3. Both down → `lfm3-npu recover`
+4. NPU hardware issues → Check `xrt-smi examine`, verify `/dev/accel0`
+5. Persistent issues → Check `lfm3-npu doctor` output
+6. Disk full → Free space, use `/media/scott/data` for large files
+7. NPU upgrade available → `lfm3-npu version-check --upgrade`
