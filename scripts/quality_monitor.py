@@ -21,6 +21,7 @@ Exit codes:
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -41,6 +42,7 @@ TEST_PROMPTS = [
 ]
 
 QUALITY_THRESHOLD = 0.7  # Minimum fraction of checks that must pass
+STATE_FILE = "/media/scott/data/lfm3-npu-tool/var/log/quality-monitor-state.json"
 
 
 def log(msg):
@@ -217,12 +219,41 @@ def main():
 
     last_cpu_restart_time = 0
     last_npu_restart_time = 0
+    cpu_restarts = 0
+    npu_restarts = 0
+    cpu_passed_total = 0
+    cpu_total_total = 0
+    npu_passed_total = 0
+    npu_total_total = 0
+
+    def write_state():
+        """Write quality monitor state to file for metrics exporter."""
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            state = {
+                "cpu_restarts": cpu_restarts,
+                "npu_restarts": npu_restarts,
+                "last_check": time.time(),
+                "cpu_passed": cpu_passed_total,
+                "cpu_total": cpu_total_total,
+                "npu_passed": npu_passed_total,
+                "npu_total": npu_total_total,
+            }
+            with open(STATE_FILE, "w") as f:
+                json.dump(state, f)
+        except Exception:
+            pass
 
     while True:
         cpu_passed, npu_passed, total, results = run_quality_check(args.verbose)
 
         cpu_ok = cpu_passed == total
         npu_ok = npu_passed == total
+
+        cpu_passed_total += cpu_passed
+        cpu_total_total += total
+        npu_passed_total += npu_passed
+        npu_total_total += total
 
         log(f"Quality: CPU {cpu_passed}/{total}, NPU {npu_passed}/{total}")
 
@@ -241,6 +272,7 @@ def main():
                 log("CPU quality degraded - triggering restart...")
                 if restart_cpu():
                     last_cpu_restart_time = now
+                    cpu_restarts += 1
                     log("Waiting 15s for CPU server to stabilize...")
                     time.sleep(15)
                 else:
@@ -256,6 +288,7 @@ def main():
                 log("NPU quality degraded (no reasoning trace) - triggering restart...")
                 if restart_npu():
                     last_npu_restart_time = now
+                    npu_restarts += 1
                     log("Waiting 15s for NPU server to stabilize...")
                     time.sleep(15)
                 else:
@@ -263,6 +296,9 @@ def main():
             else:
                 remaining = int(args.restart_cooldown - (now - last_npu_restart_time))
                 log(f"NPU quality degraded but restart in cooldown ({remaining}s remaining)")
+
+        # Write state for metrics exporter
+        write_state()
 
         if args.once:
             if cpu_ok and npu_ok:

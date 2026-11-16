@@ -84,6 +84,20 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_disk_free_bytes gauge
 # HELP lfm3_disk_used_percent Disk usage percent
 # TYPE lfm3_disk_used_percent gauge
+# HELP lfm3_qm_cpu_restarts Total CPU restarts by quality monitor
+# TYPE lfm3_qm_cpu_restarts counter
+# HELP lfm3_qm_npu_restarts Total NPU restarts by quality monitor
+# TYPE lfm3_qm_npu_restarts counter
+# HELP lfm3_qm_last_check Last quality monitor check timestamp
+# TYPE lfm3_qm_last_check gauge
+# HELP lfm3_qm_cpu_passed CPU quality checks passed
+# TYPE lfm3_qm_cpu_passed counter
+# HELP lfm3_qm_cpu_total Total CPU quality checks
+# TYPE lfm3_qm_cpu_total counter
+# HELP lfm3_qm_npu_passed NPU quality checks passed
+# TYPE lfm3_qm_npu_passed counter
+# HELP lfm3_qm_npu_total Total NPU quality checks
+# TYPE lfm3_qm_npu_total counter
 """
 
 
@@ -126,6 +140,33 @@ class MetricsCollector:
         self._disk_used_bytes = 0
         self._disk_free_bytes = 0
         self._disk_used_percent = 0.0
+        # Quality monitor metrics cache
+        self._qm_cpu_restarts = 0
+        self._qm_npu_restarts = 0
+        self._qm_last_check = 0.0
+        self._qm_cpu_passed = 0
+        self._qm_cpu_total = 0
+        self._qm_npu_passed = 0
+        self._qm_npu_total = 0
+
+    def _read_quality_monitor_state(self):
+        """Read quality monitor state from state file."""
+        import os
+        state_file = "/media/scott/data/lfm3-npu-tool/var/log/quality-monitor-state.json"
+        try:
+            if os.path.exists(state_file):
+                with open(state_file) as f:
+                    import json
+                    state = json.load(f)
+                self._qm_cpu_restarts = state.get("cpu_restarts", 0)
+                self._qm_npu_restarts = state.get("npu_restarts", 0)
+                self._qm_last_check = state.get("last_check", 0.0)
+                self._qm_cpu_passed = state.get("cpu_passed", 0)
+                self._qm_cpu_total = state.get("cpu_total", 0)
+                self._qm_npu_passed = state.get("npu_passed", 0)
+                self._qm_npu_total = state.get("npu_total", 0)
+        except Exception:
+            pass
 
     def fetch_json(self, url: str, timeout: float = 10.0):
         """Fetch JSON from URL, return None on failure."""
@@ -295,6 +336,9 @@ class MetricsCollector:
         # Collect disk usage metrics
         self._collect_disk_metrics()
 
+        # Read quality monitor state
+        self._read_quality_monitor_state()
+
         # Process metrics
         proc = self.find_npu_process()
         process_cpu_percent = 0
@@ -337,6 +381,13 @@ class MetricsCollector:
             "disk_used_bytes": self._disk_used_bytes,
             "disk_free_bytes": self._disk_free_bytes,
             "disk_used_percent": self._disk_used_percent,
+            "qm_cpu_restarts": self._qm_cpu_restarts,
+            "qm_npu_restarts": self._qm_npu_restarts,
+            "qm_last_check": self._qm_last_check,
+            "qm_cpu_passed": self._qm_cpu_passed,
+            "qm_cpu_total": self._qm_cpu_total,
+            "qm_npu_passed": self._qm_npu_passed,
+            "qm_npu_total": self._qm_npu_total,
         }
 
 
@@ -372,6 +423,15 @@ def format_prometheus(metrics: dict) -> str:
     lines.append(f'lfm3_disk_used_bytes {metrics["disk_used_bytes"]}')
     lines.append(f'lfm3_disk_free_bytes {metrics["disk_free_bytes"]}')
     lines.append(f'lfm3_disk_used_percent {metrics["disk_used_percent"]}')
+
+    # Quality monitor metrics
+    lines.append(f'lfm3_qm_cpu_restarts {metrics["qm_cpu_restarts"]}')
+    lines.append(f'lfm3_qm_npu_restarts {metrics["qm_npu_restarts"]}')
+    lines.append(f'lfm3_qm_last_check {metrics["qm_last_check"]}')
+    lines.append(f'lfm3_qm_cpu_passed {metrics["qm_cpu_passed"]}')
+    lines.append(f'lfm3_qm_cpu_total {metrics["qm_cpu_total"]}')
+    lines.append(f'lfm3_qm_npu_passed {metrics["qm_npu_passed"]}')
+    lines.append(f'lfm3_qm_npu_total {metrics["qm_npu_total"]}')
 
     # Request duration histogram
     durations = metrics["durations"]

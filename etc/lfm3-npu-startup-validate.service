@@ -1,0 +1,13 @@
+[Unit]
+Description=LFM3-1.7B Startup Validation
+After=network-online.target lfm3-npu-cpu.service lfm3-npu-npu.service lfm3-npu-metrics.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/startup-validate.py
+Environment=TMPDIR=/media/scott/data/tmp
+Environment=PATH=/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

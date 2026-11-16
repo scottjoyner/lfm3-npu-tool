@@ -1,0 +1,9 @@
+[Unit]
+Description=Run LFM3-1.7B Startup Validation at boot
+
+[Timer]
+OnBootSec=1min
+Unit=lfm3-npu-startup-validate.service
+
+[Install]
+WantedBy=timers.target

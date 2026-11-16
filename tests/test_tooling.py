@@ -175,9 +175,90 @@ def test_cli_has_all_commands():
         capture_output=True, text=True, timeout=10
     )
     output = result.stdout
-    for cmd in ["smoke-test", "quality-monitor", "version-check"]:
+    for cmd in ["smoke-test", "quality-monitor", "version-check", "benchmark-cron", "validate"]:
         assert cmd in output, f"CLI should have {cmd} command"
     print("  ✓ CLI has all expected commands")
+
+
+def test_startup_validate_script_exists():
+    """Test that startup validation script exists and is executable."""
+    import os
+    script = os.path.join(SERVER_DIR, "scripts", "startup-validate.py")
+    assert os.path.exists(script), "startup-validate.py should exist"
+    assert os.access(script, os.X_OK), "startup-validate.py should be executable"
+    print("  ✓ Startup validation script exists and is executable")
+
+
+def test_startup_validate_has_all_checks():
+    """Test that startup validation covers all critical areas."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "startup-validate.py")
+    assert os.path.exists(script_path), "startup-validate.py should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "Systemd Services" in content, "Should check systemd services"
+    assert "Systemd Timers" in content, "Should check systemd timers"
+    assert "Server Health" in content, "Should check server health"
+    assert "Metrics Exporter" in content, "Should check metrics exporter"
+    assert "NPU Generation Quality" in content, "Should check NPU generation"
+    assert "Disk Space" in content, "Should check disk space"
+    print("  ✓ Startup validation covers all critical areas")
+
+
+def test_metrics_exporter_has_disk_metrics():
+    """Test that metrics exporter exposes disk metrics."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "npu_metrics_exporter.py")
+    assert os.path.exists(script_path), "Metrics exporter should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "lfm3_disk_total_bytes" in content, "Should expose disk total"
+    assert "lfm3_disk_used_percent" in content, "Should expose disk used percent"
+    assert "_collect_disk_metrics" in content, "Should have disk collection method"
+    print("  ✓ Metrics exporter exposes disk metrics")
+
+
+def test_metrics_exporter_has_quality_monitor_metrics():
+    """Test that metrics exporter exposes quality monitor metrics."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "npu_metrics_exporter.py")
+    assert os.path.exists(script_path), "Metrics exporter should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "lfm3_qm_cpu_restarts" in content, "Should expose CPU restarts"
+    assert "lfm3_qm_npu_restarts" in content, "Should expose NPU restarts"
+    assert "_read_quality_monitor_state" in content, "Should read QM state"
+    print("  ✓ Metrics exporter exposes quality monitor metrics")
+
+
+def test_quality_monitor_writes_state():
+    """Test that quality monitor writes state file."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "quality_monitor.py")
+    assert os.path.exists(script_path), "Quality monitor should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "STATE_FILE" in content, "Should define state file path"
+    assert "write_state" in content, "Should have write_state function"
+    assert "cpu_restarts" in content, "Should track CPU restarts"
+    assert "npu_restarts" in content, "Should track NPU restarts"
+    print("  ✓ Quality monitor writes state file")
+
+
+def test_startup_validate_service_exists():
+    """Test that startup validate systemd service exists."""
+    import os
+    svc_path = os.path.join(SERVER_DIR, "etc", "lfm3-npu-startup-validate.service")
+    timer_path = os.path.join(SERVER_DIR, "etc", "lfm3-npu-startup-validate.timer")
+    assert os.path.exists(svc_path), "Startup validate service should exist"
+    assert os.path.exists(timer_path), "Startup validate timer should exist"
+    with open(svc_path) as f:
+        content = f.read()
+    assert "Type=oneshot" in content, "Should be oneshot service"
+    with open(timer_path) as f:
+        timer_content = f.read()
+    assert "OnBootSec" in timer_content, "Timer should run on boot"
+    print("  ✓ Startup validate service/timer exists")
 
 
 def main():
@@ -200,6 +281,12 @@ def main():
         test_metrics_service_has_cpu_metrics,
         test_quality_monitor_has_degradation_detection,
         test_cli_has_all_commands,
+        test_startup_validate_script_exists,
+        test_startup_validate_has_all_checks,
+        test_metrics_exporter_has_disk_metrics,
+        test_metrics_exporter_has_quality_monitor_metrics,
+        test_quality_monitor_writes_state,
+        test_startup_validate_service_exists,
     ]
 
     passed = 0
