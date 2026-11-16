@@ -63,6 +63,123 @@ def test_server_manager():
     print("  ✓ ServerManager instantiation works")
 
 
+def test_smoke_test_script_exists():
+    """Test that smoke test script exists and is executable."""
+    import os
+    script = os.path.join(SERVER_DIR, "scripts", "smoke_test.py")
+    assert os.path.exists(script), "smoke_test.py should exist"
+    assert os.access(script, os.X_OK), "smoke_test.py should be executable"
+    print("  ✓ Smoke test script exists and is executable")
+
+
+def test_ci_test_script_exists():
+    """Test that CI test script exists and is executable."""
+    import os
+    script = os.path.join(SERVER_DIR, "scripts", "ci_test.py")
+    assert os.path.exists(script), "ci_test.py should exist"
+    assert os.access(script, os.X_OK), "ci_test.py should be executable"
+    print("  ✓ CI test script exists and is executable")
+
+
+def test_quality_monitor_script_exists():
+    """Test that quality monitor script exists and is executable."""
+    import os
+    script = os.path.join(SERVER_DIR, "scripts", "quality_monitor.py")
+    assert os.path.exists(script), "quality_monitor.py should exist"
+    assert os.access(script, os.X_OK), "quality_monitor.py should be executable"
+    print("  ✓ Quality monitor script exists and is executable")
+
+
+def test_deploy_script_exists():
+    """Test that deploy script exists and is executable."""
+    import os
+    script = os.path.join(SERVER_DIR, "deploy.sh")
+    assert os.path.exists(script), "deploy.sh should exist"
+    assert os.access(script, os.X_OK), "deploy.sh should be executable"
+    print("  ✓ Deploy script exists and is executable")
+
+
+def test_grafana_dashboard_valid_json():
+    """Test that Grafana dashboard JSON is valid."""
+    import json
+    dashboard_path = os.path.join(SERVER_DIR, "etc", "grafana-dashboard-lfm3-npu.json")
+    assert os.path.exists(dashboard_path), "Grafana dashboard should exist"
+    with open(dashboard_path) as f:
+        d = json.load(f)
+    assert "dashboard" in d, "Dashboard should have 'dashboard' key"
+    assert "panels" in d["dashboard"], "Dashboard should have panels"
+    assert len(d["dashboard"]["panels"]) >= 13, "Should have at least 13 panels"
+    print(f"  ✓ Grafana dashboard JSON is valid ({len(d['dashboard']['panels'])} panels)")
+
+
+def test_prometheus_rules_valid_yaml():
+    """Test that Prometheus rules YAML is valid."""
+    import os
+    rules_path = os.path.join(SERVER_DIR, "etc", "prometheus-rules-lfm3-npu.yml")
+    assert os.path.exists(rules_path), "Prometheus rules should exist"
+    with open(rules_path) as f:
+        content = f.read()
+    assert "groups:" in content, "Rules should have groups"
+    assert "LFM3NPUServerDown" in content, "Should have NPU down alert"
+    assert "LFM3CPUServerDown" in content, "Should have CPU down alert"
+    assert "LFM3CPUDecodeSlow" in content, "Should have CPU decode slow alert"
+    assert "LFM3CPUUptimeHigh" in content, "Should have CPU uptime high alert"
+    print("  ✓ Prometheus rules YAML is valid with all alerts")
+
+
+def test_watchdog_service_has_execstartpre():
+    """Test that NPU service has ExecStartPre for port cleanup."""
+    import os
+    svc_path = os.path.join(SERVER_DIR, "etc", "lfm3-npu-npu.service")
+    assert os.path.exists(svc_path), "NPU service should exist"
+    with open(svc_path) as f:
+        content = f.read()
+    assert "ExecStartPre" in content, "NPU service should have ExecStartPre"
+    assert "pkill" in content, "ExecStartPre should kill stale processes"
+    print("  ✓ NPU service has ExecStartPre for port cleanup")
+
+
+def test_metrics_service_has_cpu_metrics():
+    """Test that metrics exporter exposes CPU metrics."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "npu_metrics_exporter.py")
+    assert os.path.exists(script_path), "Metrics exporter should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "lfm3_cpu_up" in content, "Should expose CPU up metric"
+    assert "lfm3_cpu_avg_decode_ms" in content, "Should expose CPU decode ms"
+    assert "cpu_port" in content, "Should accept CPU port argument"
+    print("  ✓ Metrics exporter exposes CPU metrics")
+
+
+def test_quality_monitor_has_degradation_detection():
+    """Test that quality monitor has degradation detection logic."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "quality_monitor.py")
+    assert os.path.exists(script_path), "Quality monitor should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "conversation loop" in content, "Should detect conversation loops"
+    assert "numbered list explosion" in content, "Should detect list explosions"
+    assert "repeated characters" in content, "Should detect repeated chars"
+    assert "wrong math" in content, "Should detect wrong math"
+    assert "restart_cooldown" in content, "Should have restart cooldown"
+    print("  ✓ Quality monitor has degradation detection")
+
+
+def test_cli_has_all_commands():
+    """Test that CLI has all expected commands."""
+    import subprocess
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"), "--help"],
+        capture_output=True, text=True, timeout=10
+    )
+    output = result.stdout
+    for cmd in ["smoke-test", "quality-monitor", "version-check"]:
+        assert cmd in output, f"CLI should have {cmd} command"
+    print("  ✓ CLI has all expected commands")
+
+
 def main():
     """Run all tests."""
     print("Running LFM3-1.7B NPU tooling tests...\n")
@@ -73,6 +190,16 @@ def main():
         test_converter,
         test_benchmark,
         test_server_manager,
+        test_smoke_test_script_exists,
+        test_ci_test_script_exists,
+        test_quality_monitor_script_exists,
+        test_deploy_script_exists,
+        test_grafana_dashboard_valid_json,
+        test_prometheus_rules_valid_yaml,
+        test_watchdog_service_has_execstartpre,
+        test_metrics_service_has_cpu_metrics,
+        test_quality_monitor_has_degradation_detection,
+        test_cli_has_all_commands,
     ]
 
     passed = 0

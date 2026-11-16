@@ -245,9 +245,7 @@
             {"color": "red", "value": 0}
           ]
         }
-      }
       },
-      # CPU Server Status panel - inserted before closing bracket
       {
         "id": 14,
         "title": "CPU Server Status",

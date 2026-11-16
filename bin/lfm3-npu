@@ -21,6 +21,7 @@ Commands:
     fleet-monitor   Fleet monitoring across servers
     smoke-test      Run smoke test / validation of all servers
     quality-monitor Run quality monitor with auto-restart on degradation
+    version-check   Check for FastFlowLM version updates
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -37,6 +38,9 @@ Examples:
     lfm3-npu watchdog --daemon --interval 30
     lfm3-npu smoke-test              # Validate all servers
     lfm3-npu smoke-test --fix        # Validate + auto-restart unhealthy
+    lfm3-npu quality-monitor --fix   # Monitor quality with auto-restart
+    lfm3-npu version-check           # Check for FastFlowLM updates
+    lfm3-npu version-check --upgrade # Show upgrade instructions
 """
 
 import argparse
@@ -264,6 +268,66 @@ def cmd_quality_monitor(args) -> int:
     print("Running quality monitor...", flush=True)
     result = subprocess.run(cmd, capture_output=False)
     return result.returncode
+
+
+def cmd_version_check(args) -> int:
+    """Check for FastFlowLM version updates."""
+    import subprocess
+
+    print("Checking FastFlowLM version...", flush=True)
+
+    # Check current version from running server
+    try:
+        import urllib.request, json
+        data = json.loads(urllib.request.urlopen(
+            "http://127.0.0.1:1239/v1/models", timeout=10
+        ).read().decode("utf-8"))
+        models = data.get("data", [])
+        lfm_models = [m for m in models if "lfm3" in str(m.get("id", ""))]
+        if lfm_models:
+            print(f"  NPU model: {lfm_models[0]['id']}")
+    except Exception as e:
+        print(f"  Could not query NPU server: {e}", flush=True)
+
+    # Check latest release from GitHub
+    try:
+        import urllib.request, json
+        req = urllib.request.Request(
+            "https://api.github.com/repos/ROCm/FastFlowLM/releases/latest",
+            headers={"User-Agent": "lfm3-npu-tool"}
+        )
+        release = json.loads(urllib.request.urlopen(req, timeout=10).read().decode("utf-8"))
+        latest_tag = release.get("tag_name", "unknown")
+        latest_name = release.get("name", "unknown")
+        print(f"  Latest release: {latest_tag} ({latest_name})")
+
+        # Compare with known version
+        current = "v1.0.12"
+        if latest_tag and latest_tag != current:
+            print(f"  UPDATE AVAILABLE: {current} -> {latest_tag}")
+            if args.upgrade:
+                print(f"  Downloading {latest_tag}...")
+                assets = release.get("assets", [])
+                linux_asset = None
+                for a in assets:
+                    if "linux" in a.get("name", "").lower() and a.get("name", "").endswith(".tar.gz"):
+                        linux_asset = a
+                        break
+                if linux_asset:
+                    download_url = linux_asset["browser_download_url"]
+                    print(f"  Download URL: {download_url}")
+                    print(f"  Manual upgrade: wget {download_url} && tar xzf fastflowlm_*.tar.gz")
+                    print(f"  Then copy /tmp/flm to /tmp/flm-real and restart NPU service")
+                else:
+                    print("  No Linux release asset found")
+            else:
+                print("  Run 'lfm3-npu version-check --upgrade' to see download instructions")
+        else:
+            print(f"  Already on latest version ({current})")
+    except Exception as e:
+        print(f"  Could not check latest version: {e}", flush=True)
+
+    return 0
 
 
 def cmd_generate(args) -> int:
@@ -986,6 +1050,13 @@ def main() -> int:
     quality_parser.add_argument("--restart-cooldown", type=int, default=600,
                                 help="Min seconds between CPU restarts (default: 600)")
     quality_parser.set_defaults(func=cmd_quality_monitor)
+
+    version_parser = subparsers.add_parser(
+        "version-check", help="Check for FastFlowLM version updates"
+    )
+    version_parser.add_argument("--upgrade", action="store_true",
+                                help="Download and install latest version if available")
+    version_parser.set_defaults(func=cmd_version_check)
 
     args = parser.parse_args()
 

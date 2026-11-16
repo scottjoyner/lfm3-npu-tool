@@ -151,6 +151,12 @@ for script in scripts/smoke_test.py scripts/ci_test.py scripts/quality_benchmark
     fi
 done
 
+# Install deploy script
+if [ -f "${TOOLING_DIR}/deploy.sh" ]; then
+    chmod +x "${TOOLING_DIR}/deploy.sh"
+    echo "  Installed: deploy.sh"
+fi
+
 # Setup cron watchdog
 echo ""
 echo "[10/10] Setting up automated watchdog (cron)..."
