@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfm3_npu.config import load_config
 from lfm3_npu.metrics import MetricsCollector
+from lfm3_npu.tracing import init_tracer, trace_prefill, trace_decode, trace_request, get_tracer
 
 
 def _load_layer_types(model_path: str) -> Tuple[List[int], List[int], int, int]:
@@ -129,10 +130,15 @@ KV_QUANT_MODEL_PATH = config.get("server.cpu.kv_quant_model_path", "/media/scott
 USE_KV_QUANT = config.get("server.cpu.use_kv_quant", False)
 TOKENIZER_PATH = config.get("model.tokenizer", "/media/scott/data/lfm3_oga_export/tokenizer.json")
 
+# Session recycling to prevent memory arena degradation
+SESSION_RECYCLE_REQUESTS = config.get("server.cpu.session_recycle_requests", 100)
+MAX_CONTEXT_LENGTH = config.get("server.cpu.max_context_length", 4096)
+
 # Global state
 tokenizer = None
 sess = None
 metrics = None
+_requests_since_recycle = 0
 
 # Layer types from config
 CONV_LAYERS: List[int] = []
@@ -183,10 +189,10 @@ def _configure_session_options() -> ort.SessionOptions:
     else:
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
-    # Memory arena optimizations
-    so.enable_cpu_mem_arena = ort_cfg.get("enable_cpu_mem_arena", True)
-    so.enable_mem_reuse = ort_cfg.get("enable_mem_reuse", True) and not USE_KV_QUANT
-    so.enable_mem_pattern = ort_cfg.get("enable_mem_pattern", True)
+    # Memory arena optimizations - disable arena to prevent fragmentation over time
+    so.enable_cpu_mem_arena = ort_cfg.get("enable_cpu_mem_arena", False)
+    so.enable_mem_reuse = ort_cfg.get("enable_mem_reuse", False) and not USE_KV_QUANT
+    so.enable_mem_pattern = ort_cfg.get("enable_mem_pattern", False)
 
     # Session config entries
     session_entries = ort_cfg.get("session_config_entries", {})
@@ -224,6 +230,38 @@ def load_model():
     print(f"CPU Server: Providers: {sess.get_providers()}", flush=True)
     print(f"CPU Server: Model loaded on CPU EP", flush=True)
     print(f"CPU Server: Conv layers: {CONV_LAYERS}, Attention layers: {ATTN_LAYERS}", flush=True)
+    _requests_since_recycle = 0
+
+    # Initialize OpenTelemetry tracer
+    otlp_endpoint = os.environ.get("LFM3_OTLP_ENDPOINT")
+    tracing_enabled = os.environ.get("LFM3_TRACING_ENABLED", "false").lower() == "true"
+    if tracing_enabled and otlp_endpoint:
+        init_tracer(service_name="lfm3-cpu", otlp_endpoint=otlp_endpoint, enabled=True)
+        print(f"CPU Server: OpenTelemetry tracing enabled (endpoint: {otlp_endpoint})", flush=True)
+    else:
+        init_tracer(service_name="lfm3-cpu", enabled=False)
+
+
+def _recycle_session_if_needed():
+    """Reload the ONNX session periodically to prevent memory arena degradation.
+
+    ONNX Runtime's CPU memory arena can fragment over hundreds of requests,
+    causing decode latency to creep up. Recycling the session resets the arena.
+    """
+    global sess, _requests_since_recycle
+    _requests_since_recycle += 1
+    if _requests_since_recycle >= SESSION_RECYCLE_REQUESTS:
+        print(f"CPU Server: Recycling session after {_requests_since_recycle} requests", flush=True)
+        sess = None
+        load_model()
+
+
+def _enforce_max_context(prompt_len: int, max_tokens: int) -> int:
+    """Cap max_tokens so total context stays within MAX_CONTEXT_LENGTH."""
+    available = MAX_CONTEXT_LENGTH - prompt_len
+    if available <= 0:
+        return 0
+    return min(max_tokens, available)
 
 
 @asynccontextmanager
@@ -318,86 +356,103 @@ def _generate_text(
     top_p: float,
 ) -> str:
     """Generate text (non-streaming). Returns the generated text string."""
-    encoded = tokenizer.encode(prompt)
-    input_ids_list = encoded.ids
-    prompt_len = len(input_ids_list)
+    _recycle_session_if_needed()
 
-    # Initialize empty state (seq_len=0)
-    past_conv, past_kv = _build_initial_state(
-        CONV_LAYERS, ATTN_LAYERS,
-        seq_len=0, hidden=HIDDEN, conv_l_cache=CONV_L_CACHE,
-        num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
-        use_kv_quant=USE_KV_QUANT,
-    )
+    tracer = get_tracer()
 
-    # Prefill
-    input_ids_arr = np.array([input_ids_list], dtype=np.int64)
-    attention_mask_arr = np.ones((1, prompt_len), dtype=np.int64)
-    position_ids_arr = np.array([list(range(prompt_len))], dtype=np.int64)
-    logits_to_keep_arr = np.array([1], dtype=np.int64)
+    with trace_request(tracer, "CPUExecutionProvider", "lfm3-1.7b-cpu",
+                       "chat/completions", 0, max_tokens) as request_span:
+        encoded = tokenizer.encode(prompt)
+        input_ids_list = encoded.ids
+        prompt_len = len(input_ids_list)
+        request_span.set_attribute("llm.prompt_tokens", prompt_len)
 
-    feed = _build_feed(
-        input_ids_arr, attention_mask_arr, position_ids_arr,
-        logits_to_keep_arr, past_conv, past_kv,
-    )
+        max_tokens = _enforce_max_context(prompt_len, max_tokens)
+        if max_tokens <= 0:
+            return ""
 
-    prefill_start = time.perf_counter()
-    outputs = sess.run(None, feed)
-    prefill_duration = time.perf_counter() - prefill_start
-    metrics.record_prefill(prefill_duration, prompt_len)
+        # Initialize empty state (seq_len=0)
+        past_conv, past_kv = _build_initial_state(
+            CONV_LAYERS, ATTN_LAYERS,
+            seq_len=0, hidden=HIDDEN, conv_l_cache=CONV_L_CACHE,
+            num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
+            use_kv_quant=USE_KV_QUANT,
+        )
 
-    output_names = [o.name for o in sess.get_outputs()]
-    res = dict(zip(output_names, outputs))
-    logits = res["logits"]
-
-    # Update state from prefill outputs
-    past_conv, past_kv = _update_state(
-        past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
-        use_kv_quant=USE_KV_QUANT,
-    )
-
-    next_logits = logits[0, -1, :]
-    generated_ids = list(input_ids_list)
-
-    # Decode
-    decode_start = time.perf_counter()
-    token_times: List[float] = []
-
-    for step in range(max_tokens):
-        token_start = time.perf_counter()
-
-        next_token = _sample_token(next_logits, temperature, top_p)
-        generated_ids.append(next_token)
-
-        if next_token == 124900:
-            break
-
-        seq_len = prompt_len + step + 1
-        input_ids_arr = np.array([[next_token]], dtype=np.int64)
-        attention_mask_arr = np.ones((1, seq_len), dtype=np.int64)
-        position_ids_arr = np.array([[seq_len - 1]], dtype=np.int64)
+        # Prefill
+        input_ids_arr = np.array([input_ids_list], dtype=np.int64)
+        attention_mask_arr = np.ones((1, prompt_len), dtype=np.int64)
+        position_ids_arr = np.array([list(range(prompt_len))], dtype=np.int64)
         logits_to_keep_arr = np.array([1], dtype=np.int64)
 
         feed = _build_feed(
             input_ids_arr, attention_mask_arr, position_ids_arr,
             logits_to_keep_arr, past_conv, past_kv,
         )
-        outputs = sess.run(None, feed)
-        logits = outputs[0]
-        next_logits = logits[0, -1, :]
 
-        # Update state from outputs
+        with trace_prefill(tracer, "CPUExecutionProvider", "lfm3-1.7b-cpu", prompt_len):
+            prefill_start = time.perf_counter()
+            outputs = sess.run(None, feed)
+            prefill_duration = time.perf_counter() - prefill_start
+        metrics.record_prefill(prefill_duration, prompt_len)
+
+        output_names = [o.name for o in sess.get_outputs()]
         res = dict(zip(output_names, outputs))
+        logits = res["logits"]
+
+        # Update state from prefill outputs
         past_conv, past_kv = _update_state(
             past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
+            use_kv_quant=USE_KV_QUANT,
         )
 
-        token_duration = time.perf_counter() - token_start
-        token_times.append(token_duration)
-        metrics.record_token_generation(token_duration)
+        next_logits = logits[0, -1, :]
+        generated_ids = list(input_ids_list)
 
-    decode_duration = time.perf_counter() - decode_start
-    metrics.record_decode(decode_duration, len(generated_ids) - prompt_len)
+        # Decode
+        decode_start = time.perf_counter()
+        token_times: List[float] = []
+
+        for step in range(max_tokens):
+            with trace_decode(tracer, "CPUExecutionProvider", "lfm3-1.7b-cpu",
+                              step, max_tokens) as decode_span:
+                token_start = time.perf_counter()
+
+                next_token = _sample_token(next_logits, temperature, top_p)
+                generated_ids.append(next_token)
+
+                if next_token == 124900:
+                    break
+
+                seq_len = prompt_len + step + 1
+                input_ids_arr = np.array([[next_token]], dtype=np.int64)
+                attention_mask_arr = np.ones((1, seq_len), dtype=np.int64)
+                position_ids_arr = np.array([[seq_len - 1]], dtype=np.int64)
+                logits_to_keep_arr = np.array([1], dtype=np.int64)
+
+                feed = _build_feed(
+                    input_ids_arr, attention_mask_arr, position_ids_arr,
+                    logits_to_keep_arr, past_conv, past_kv,
+                )
+                outputs = sess.run(None, feed)
+                logits = outputs[0]
+                next_logits = logits[0, -1, :]
+
+                # Update state from outputs
+                res = dict(zip(output_names, outputs))
+                past_conv, past_kv = _update_state(
+                    past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
+                )
+
+                token_duration = time.perf_counter() - token_start
+                token_times.append(token_duration)
+                metrics.record_token_generation(token_duration)
+                decode_span.set_attribute("llm.token_duration_seconds", token_duration)
+
+        decode_duration = time.perf_counter() - decode_start
+        metrics.record_decode(decode_duration, len(generated_ids) - prompt_len)
+        request_span.set_attribute("llm.completion_tokens", len(generated_ids) - prompt_len)
+        request_span.set_attribute("llm.duration_seconds", time.perf_counter() - request_span.start_time if hasattr(request_span, 'start_time') else 0)
 
     return tokenizer.decode(generated_ids[prompt_len:])
 
@@ -409,6 +464,10 @@ def _generate_stream(
     top_p: float,
 ):
     """Generate text (streaming). Yields SSE-compatible chunks."""
+    _recycle_session_if_needed()
+
+    tracer = get_tracer()
+
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -416,58 +475,8 @@ def _generate_stream(
     input_ids_list = encoded.ids
     prompt_len = len(input_ids_list)
 
-    # Initialize empty state (seq_len=0)
-    past_conv, past_kv = _build_initial_state(
-        CONV_LAYERS, ATTN_LAYERS,
-        seq_len=0, hidden=HIDDEN, conv_l_cache=CONV_L_CACHE,
-        num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
-        use_kv_quant=USE_KV_QUANT,
-    )
-
-    # Prefill
-    input_ids_arr = np.array([input_ids_list], dtype=np.int64)
-    attention_mask_arr = np.ones((1, prompt_len), dtype=np.int64)
-    position_ids_arr = np.array([list(range(prompt_len))], dtype=np.int64)
-    logits_to_keep_arr = np.array([1], dtype=np.int64)
-
-    feed = _build_feed(
-        input_ids_arr, attention_mask_arr, position_ids_arr,
-        logits_to_keep_arr, past_conv, past_kv,
-    )
-
-    outputs = sess.run(None, feed)
-    output_names = [o.name for o in sess.get_outputs()]
-    res = dict(zip(output_names, outputs))
-    logits = res["logits"]
-
-    # Record prefill metrics
-    prefill_start = time.perf_counter()
-    # Update state from prefill outputs
-    past_conv, past_kv = _update_state(
-        past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
-        use_kv_quant=USE_KV_QUANT,
-    )
-    prefill_duration = time.perf_counter() - prefill_start
-    metrics.record_prefill(prefill_duration, prompt_len)
-
-    next_logits = logits[0, -1, :]
-    generated_ids = list(input_ids_list)
-
-    # Decode
-    decode_start = time.perf_counter()
-    token_times: List[float] = []
-
-    for step in range(max_tokens):
-        token_start = time.perf_counter()
-
-        next_token = _sample_token(next_logits, temperature, top_p)
-        generated_ids.append(next_token)
-
-        if next_token == 124900:
-            break
-
-        token_text = tokenizer.decode([next_token])
-
+    max_tokens = _enforce_max_context(prompt_len, max_tokens)
+    if max_tokens <= 0:
         yield {
             "id": chunk_id,
             "object": "chat.completion.chunk",
@@ -476,54 +485,125 @@ def _generate_stream(
             "choices": [
                 {
                     "index": 0,
-                    "delta": {"content": token_text},
-                    "finish_reason": None,
+                    "delta": {"content": ""},
+                    "finish_reason": "length",
                 }
             ]
         }
+        return
 
-        seq_len = prompt_len + step + 1
-        input_ids_arr = np.array([[next_token]], dtype=np.int64)
-        attention_mask_arr = np.ones((1, seq_len), dtype=np.int64)
-        position_ids_arr = np.array([[seq_len - 1]], dtype=np.int64)
+    with trace_request(tracer, "CPUExecutionProvider", "lfm3-1.7b-cpu",
+                       "chat/completions", prompt_len, max_tokens):
+        # Initialize empty state (seq_len=0)
+        past_conv, past_kv = _build_initial_state(
+            CONV_LAYERS, ATTN_LAYERS,
+            seq_len=0, hidden=HIDDEN, conv_l_cache=CONV_L_CACHE,
+            num_kv_heads=NUM_KV_HEADS, head_dim=HEAD_DIM,
+            use_kv_quant=USE_KV_QUANT,
+        )
+
+        # Prefill
+        input_ids_arr = np.array([input_ids_list], dtype=np.int64)
+        attention_mask_arr = np.ones((1, prompt_len), dtype=np.int64)
+        position_ids_arr = np.array([list(range(prompt_len))], dtype=np.int64)
         logits_to_keep_arr = np.array([1], dtype=np.int64)
 
         feed = _build_feed(
             input_ids_arr, attention_mask_arr, position_ids_arr,
             logits_to_keep_arr, past_conv, past_kv,
         )
-        outputs = sess.run(None, feed)
-        logits = outputs[0]
+
+        with trace_prefill(tracer, "CPUExecutionProvider", "lfm3-1.7b-cpu", prompt_len):
+            outputs = sess.run(None, feed)
+            output_names = [o.name for o in sess.get_outputs()]
+            res = dict(zip(output_names, outputs))
+            logits = res["logits"]
+            prefill_start = time.perf_counter()
+            # Update state from prefill outputs
+            past_conv, past_kv = _update_state(
+                past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
+                use_kv_quant=USE_KV_QUANT,
+            )
+            prefill_duration = time.perf_counter() - prefill_start
+        metrics.record_prefill(prefill_duration, prompt_len)
+
         next_logits = logits[0, -1, :]
+        generated_ids = list(input_ids_list)
 
-        # Update state from outputs
-        res = dict(zip(output_names, outputs))
-        past_conv, past_kv = _update_state(
-            past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
-        )
+        # Decode
+        decode_start = time.perf_counter()
+        token_times: List[float] = []
 
-        token_duration = time.perf_counter() - token_start
-        token_times.append(token_duration)
-        metrics.record_token_generation(token_duration)
+        for step in range(max_tokens):
+            with trace_decode(tracer, "CPUExecutionProvider", "lfm3-1.7b-cpu",
+                              step, max_tokens) as decode_span:
+                token_start = time.perf_counter()
 
-    decode_duration = time.perf_counter() - decode_start
-    metrics.record_decode(decode_duration, len(generated_ids) - prompt_len)
+                next_token = _sample_token(next_logits, temperature, top_p)
+                generated_ids.append(next_token)
 
-    # Final chunk
-    yield {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": "lfm3-1.7b-cpu",
-        "choices": [
-            {
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop",
-            }
-        ]
-    }
-    yield "[DONE]"
+                if next_token == 124900:
+                    break
+
+                token_text = tokenizer.decode([next_token])
+
+                yield {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": "lfm3-1.7b-cpu",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": token_text},
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+
+                seq_len = prompt_len + step + 1
+                input_ids_arr = np.array([[next_token]], dtype=np.int64)
+                attention_mask_arr = np.ones((1, seq_len), dtype=np.int64)
+                position_ids_arr = np.array([[seq_len - 1]], dtype=np.int64)
+                logits_to_keep_arr = np.array([1], dtype=np.int64)
+
+                feed = _build_feed(
+                    input_ids_arr, attention_mask_arr, position_ids_arr,
+                    logits_to_keep_arr, past_conv, past_kv,
+                )
+                outputs = sess.run(None, feed)
+                logits = outputs[0]
+                next_logits = logits[0, -1, :]
+
+                # Update state from outputs
+                res = dict(zip(output_names, outputs))
+                past_conv, past_kv = _update_state(
+                    past_conv, past_kv, res, CONV_LAYERS, ATTN_LAYERS,
+                )
+
+                token_duration = time.perf_counter() - token_start
+                token_times.append(token_duration)
+                metrics.record_token_generation(token_duration)
+                decode_span.set_attribute("llm.token_duration_seconds", token_duration)
+
+        decode_duration = time.perf_counter() - decode_start
+        metrics.record_decode(decode_duration, len(generated_ids) - prompt_len)
+
+        # Final chunk
+        yield {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": "lfm3-1.7b-cpu",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        yield "[DONE]"
 
 
 @app.post("/v1/chat/completions")
