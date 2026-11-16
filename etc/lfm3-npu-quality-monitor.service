@@ -8,8 +8,6 @@ Type=simple
 ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/quality_monitor.py --interval 300 --fix --restart-cooldown 600
 Restart=always
 RestartSec=30
-StartLimitIntervalSec=300
-StartLimitBurst=5
 Environment=TMPDIR=/media/scott/data/tmp
 Environment=PATH=/usr/bin:/bin
 
