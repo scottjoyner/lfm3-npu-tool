@@ -25,11 +25,11 @@ ENV PYTHONPATH=/media/scott/data/lfm3-npu-tool/lib
 COPY . /media/scott/data/lfm3-npu-tool/
 
 # Install Python dependencies
-RUN pip3 install fastapi uvicorn onnxruntime tokenizers numpy pydantic psutil psutil yaml
+RUN pip3 install fastapi uvicorn onnxruntime tokenizers numpy pydantic pyyaml psutil
 
-# Copy FLM binary and NPU engine (built separately)
-COPY --from=build /tmp/flm /tmp/flm
-COPY --from=build /tmp/lib/liblfm3_npu.so /tmp/lib/liblfm3_npu.so
+# Copy FLM binary and NPU engine (built separately on host)
+# These must be present at /tmp/flm and /tmp/lib/liblfm3_npu.so before building
+# See: https://github.com/ROCm/FastFlowLM/releases/tag/v1.0.12
 
 # Expose ports
 EXPOSE 1238 1239 9190

@@ -288,6 +288,19 @@ systemctl --user status lfm3-npu-quality-monitor.service
 systemctl --user status lfm3-npu-quality-monitor.timer
 ```
 
+### Server Recovery
+
+If both servers are down or unhealthy, use the recover command:
+
+```bash
+# Stop all services, start them, wait for health, and validate
+lfm3-npu recover
+```
+
+This stops all services, kills any remaining processes, starts all services
+in order, waits up to 60 seconds for them to become healthy, and runs
+startup validation.
+
 ### Operations Runbook
 
 See `OPERATIONS_RUNBOOK.md` for complete deployment, monitoring,
