@@ -19,6 +19,7 @@ Commands:
     doctor          Diagnose system health (servers, NPU, env, disk)
     watchdog        Run server watchdog (auto-restart unresponsive servers)
     fleet-monitor   Fleet monitoring across servers
+    smoke-test      Run smoke test / validation of all servers
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -33,6 +34,8 @@ Examples:
     lfm3-npu doctor                    # Run full system diagnosis
     lfm3-npu watchdog --once
     lfm3-npu watchdog --daemon --interval 30
+    lfm3-npu smoke-test              # Validate all servers
+    lfm3-npu smoke-test --fix        # Validate + auto-restart unhealthy
 """
 
 import argparse
@@ -213,6 +216,27 @@ def cmd_fleet_monitor(args) -> int:
         time.sleep(args.interval)
 
     return 0
+
+
+def cmd_smoke_test(args) -> int:
+    """Run smoke test / validation of all servers."""
+    import subprocess
+    import json
+
+    script = os.path.join(SERVER_DIR, "scripts", "smoke_test.py")
+    if not os.path.exists(script):
+        print(f"Smoke test script not found: {script}", flush=True)
+        return 1
+
+    cmd = ["python3", script]
+    if args.verbose:
+        cmd.append("--verbose")
+    if args.fix:
+        cmd.append("--fix")
+
+    print("Running smoke test...", flush=True)
+    result = subprocess.run(cmd, capture_output=False)
+    return result.returncode
 
 
 def cmd_generate(args) -> int:
@@ -911,6 +935,15 @@ def main() -> int:
     fleet_parser.add_argument("--gen-grafana-dashboard", action="store_true",
                               help="Generate Grafana dashboard JSON and exit")
     fleet_parser.set_defaults(func=cmd_fleet_monitor)
+
+    smoke_parser = subparsers.add_parser(
+        "smoke-test", help="Run smoke test / validation of all servers"
+    )
+    smoke_parser.add_argument("--verbose", action="store_true",
+                              help="Verbose output")
+    smoke_parser.add_argument("--fix", action="store_true",
+                              help="Attempt to restart unhealthy servers via systemctl")
+    smoke_parser.set_defaults(func=cmd_smoke_test)
 
     args = parser.parse_args()
 

@@ -230,6 +230,28 @@ Installed at `~/.config/prometheus-lfm3.yml`. Scrapes `localhost:9190/metrics`.
 
 Installed at `~/.config/alertmanager-lfm3.yml`. Email and Slack alert routing.
 
+### Smoke Test & CI Validation
+
+Quick validation of all servers:
+
+```bash
+# CLI smoke test
+lfm3-npu smoke-test --verbose
+
+# Or run directly
+python3 scripts/smoke_test.py --verbose
+
+# CI test suite (for automated validation)
+python3 scripts/ci_test.py
+```
+
+The smoke test checks:
+- CPU server `/health` endpoint
+- NPU server `/v1/models` endpoint
+- Metrics exporter on port 9190
+- Generation quality on both servers (correct answers, no degradation)
+- Watchdog can run successfully
+
 ### Operations Runbook
 
 See `OPERATIONS_RUNBOOK.md` for complete deployment, monitoring,

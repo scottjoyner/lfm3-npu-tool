@@ -102,19 +102,24 @@ class Watchdog:
         self._consecutive_failures[server] = self._consecutive_failures.get(server, 0) + 1
 
     def check_health(self, server: str) -> bool:
-        """Check if a server is responding to health requests."""
+        """Check if a server is responding to health requests.
+
+        CPU server uses /health endpoint; NPU server (FastFlowLM) uses /v1/models.
+        """
         if server == "cpu":
             port = self.config.get("server.cpu.port", 1238)
             host = self.config.get("server.cpu.host", "0.0.0.0")
+            path = "/health"
         elif server == "npu":
             port = self.config.get("server.npu.port", 1239)
             host = self.config.get("server.npu.host", "0.0.0.0")
+            path = "/v1/models"
         else:
             return False
 
         try:
             req = urllib.request.urlopen(
-                f"http://{host}:{port}/health", timeout=5
+                f"http://{host}:{port}{path}", timeout=5
             )
             return req.status == 200
         except Exception:

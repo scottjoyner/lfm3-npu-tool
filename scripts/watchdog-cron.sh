@@ -9,7 +9,7 @@ set -uo pipefail
 
 TOOL_DIR="/media/scott/data/lfm3-npu-tool"
 LOG_FILE="${TOOL_DIR}/var/log/watchdog-cron.log"
-MAX_UPTIME_HOURS="${LFM3_WATCHDOG_MAX_UPTIME_HOURS:-24}"
+MAX_UPTIME_HOURS="${LFM3_WATCHDOG_MAX_UPTIME_HOURS:-4}"
 MAX_GARBLE_RATIO="${LFM3_WATCHDOG_MAX_GARBLE_RATIO:-0.3}"
 
 mkdir -p "${TOOL_DIR}/var/log"

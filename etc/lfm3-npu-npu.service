@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Kill any stale FLM processes holding port 1239 before starting
+ExecStartPre=/bin/bash -c 'pkill -f "flm serve lfm3:1.7b" 2>/dev/null || true; pkill -f "flm-real serve lfm3:1.7b" 2>/dev/null || true; sleep 2'
 ExecStart=/tmp/flm serve lfm3:1.7b -p 1239 --host 127.0.0.1
 Restart=always
 RestartSec=5

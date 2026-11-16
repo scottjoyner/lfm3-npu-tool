@@ -66,6 +66,16 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_npu_last_request_duration gauge
 # HELP lfm3_npu_last_request_success Whether last test request succeeded
 # TYPE lfm3_npu_last_request_success gauge
+# HELP lfm3_cpu_up Whether the CPU server is reachable
+# TYPE lfm3_cpu_up gauge
+# HELP lfm3_cpu_uptime_seconds CPU server uptime in seconds
+# TYPE lfm3_cpu_uptime_seconds gauge
+# HELP lfm3_cpu_avg_decode_ms CPU server average decode time in ms
+# TYPE lfm3_cpu_avg_decode_ms gauge
+# HELP lfm3_cpu_active_slots CPU server active request slots
+# TYPE lfm3_cpu_active_slots gauge
+# HELP lfm3_cpu_free_slots CPU server free request slots
+# TYPE lfm3_cpu_free_slots gauge
 """
 
 
@@ -73,11 +83,14 @@ class MetricsCollector:
     """Collects and stores metrics from the NPU server."""
 
     def __init__(self, npu_port: int, npu_host: str = "127.0.0.1",
+                 cpu_port: int = 1238, cpu_host: str = "127.0.0.1",
                  test_prompt: str = DEFAULT_TEST_PROMPT,
                  max_duration_samples: int = 1000,
                  warmup_seconds: int = 30):
         self.npu_port = npu_port
         self.npu_host = npu_host
+        self.cpu_port = cpu_port
+        self.cpu_host = cpu_host
         self.test_prompt = test_prompt
         self.max_duration_samples = max_duration_samples
         self.warmup_seconds = warmup_seconds
@@ -92,6 +105,12 @@ class MetricsCollector:
         self._last_decode_tps = 0.0
         self._last_duration = 0.0
         self._last_success = False
+        # CPU metrics cache
+        self._cpu_up = 0
+        self._cpu_uptime = 0.0
+        self._cpu_avg_decode_ms = 0.0
+        self._cpu_active_slots = 0
+        self._cpu_free_slots = 0
 
     def fetch_json(self, url: str, timeout: float = 10.0):
         """Fetch JSON from URL, return None on failure."""
@@ -219,6 +238,23 @@ class MetricsCollector:
             if lfm_models:
                 lfm3_available = 1
 
+        # Check CPU server /health endpoint
+        cpu_data = self.fetch_json(
+            f"http://{self.cpu_host}:{self.cpu_port}/health", timeout=5
+        )
+        if cpu_data and cpu_data.get("status") == "healthy":
+            self._cpu_up = 1
+            self._cpu_uptime = cpu_data.get("uptime_seconds", 0.0)
+            self._cpu_avg_decode_ms = cpu_data.get("avg_decode_ms", 0.0)
+            self._cpu_active_slots = cpu_data.get("active_slots", 0)
+            self._cpu_free_slots = cpu_data.get("free_slots", 0)
+        else:
+            self._cpu_up = 0
+            self._cpu_uptime = 0.0
+            self._cpu_avg_decode_ms = 0.0
+            self._cpu_active_slots = 0
+            self._cpu_free_slots = 0
+
         # Process metrics
         proc = self.find_npu_process()
         process_cpu_percent = 0
@@ -252,6 +288,11 @@ class MetricsCollector:
             "last_success": last_success,
             "uptime_seconds": elapsed,
             "in_warmup": in_warmup,
+            "cpu_up": self._cpu_up,
+            "cpu_uptime": self._cpu_uptime,
+            "cpu_avg_decode_ms": self._cpu_avg_decode_ms,
+            "cpu_active_slots": self._cpu_active_slots,
+            "cpu_free_slots": self._cpu_free_slots,
         }
 
 
@@ -274,6 +315,13 @@ def format_prometheus(metrics: dict) -> str:
     lines.append(f'lfm3_npu_in_warmup {1 if metrics["in_warmup"] else 0}')
     lines.append(f'lfm3_npu_last_request_duration {metrics["last_duration"]}')
     lines.append(f'lfm3_npu_last_request_success {1 if metrics["last_success"] else 0}')
+
+    # CPU server metrics
+    lines.append(f'lfm3_cpu_up {metrics["cpu_up"]}')
+    lines.append(f'lfm3_cpu_uptime_seconds {metrics["cpu_uptime"]}')
+    lines.append(f'lfm3_cpu_avg_decode_ms {metrics["cpu_avg_decode_ms"]}')
+    lines.append(f'lfm3_cpu_active_slots {metrics["cpu_active_slots"]}')
+    lines.append(f'lfm3_cpu_free_slots {metrics["cpu_free_slots"]}')
 
     # Request duration histogram
     durations = metrics["durations"]
@@ -312,6 +360,10 @@ def main():
                         help=f"NPU server port (default: {DEFAULT_NPU_PORT})")
     parser.add_argument("--npu-host", default="127.0.0.1",
                         help="NPU server host (default: 127.0.0.1)")
+    parser.add_argument("--cpu-port", type=int, default=1238,
+                        help="CPU server port (default: 1238)")
+    parser.add_argument("--cpu-host", default="127.0.0.1",
+                        help="CPU server host (default: 127.0.0.1)")
     parser.add_argument("--test-prompt", default=DEFAULT_TEST_PROMPT,
                         help=f"Test prompt for duration measurement (default: '{DEFAULT_TEST_PROMPT}')")
     parser.add_argument("--max-samples", type=int, default=1000,
@@ -328,6 +380,8 @@ def main():
     collector = MetricsCollector(
         npu_port=args.npu_port,
         npu_host=args.npu_host,
+        cpu_port=args.cpu_port,
+        cpu_host=args.cpu_host,
         test_prompt=args.test_prompt,
         max_duration_samples=args.max_samples,
     )

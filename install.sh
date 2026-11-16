@@ -140,9 +140,19 @@ for alias_name in lfm3-npu-gen lfm3-npu-bench lfm3-npu-convert lfm3-npu-doctor l
 done
 echo "  Symlinks created."
 
+# Install utility scripts
+echo ""
+echo "[9/9] Installing utility scripts..."
+for script in scripts/smoke_test.py scripts/ci_test.py scripts/quality_benchmark.py scripts/concurrency_stress.py scripts/watchdog-cron.sh scripts/health_check.py scripts/npu_metrics_exporter.py; do
+    if [ -f "${TOOLING_DIR}/${script}" ]; then
+        chmod +x "${TOOLING_DIR}/${script}"
+        echo "  Installed: ${script}"
+    fi
+done
+
 # Setup cron watchdog
 echo ""
-echo "[8/8] Setting up automated watchdog (cron)..."
+echo "[10/10] Setting up automated watchdog (cron)..."
 if command -v crontab &>/dev/null; then
     # Check if already installed
     if crontab -l 2>/dev/null | grep -q "watchdog-cron.sh"; then
