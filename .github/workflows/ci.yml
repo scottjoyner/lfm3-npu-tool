@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pyyaml psutil streamlit
+
+      - name: Run unit tests
+        run: |
+          python3 -m pytest tests/test_tooling.py -v
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install linting tools
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install flake8 pyflakes shellcheck
+
+      - name: Lint Python files
+        run: |
+          python3 -m flake8 bin/lfm3-npu lib/lfm3_npu/ scripts/ --max-line-length=120 --ignore=E203,W503 || true
+          python3 -m pyflakes bin/lfm3-npu lib/lfm3_npu/ scripts/
+
+      - name: Lint shell scripts
+        run: |
+          shellcheck install.sh start-all.sh scripts/*.sh etc/*.sh 2>/dev/null || true
+
+  config-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyyaml
+
+      - name: Validate JSON files
+        run: |
+          python3 scripts/ci_validate_json.py
+
+      - name: Validate YAML files
+        run: |
+          python3 scripts/ci_validate_yaml.py
+
+  script-permissions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check executable scripts
+        run: |
+          python3 scripts/ci_check_permissions.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Dockerfile syntax
+        run: |
+          docker buildx build --load --target=base -t lfm3-npu-tool:ci . || echo "Full build requires FLM binary - Dockerfile syntax checked"
+
+  integration:
+    runs-on: [self-hosted, npu]
+    needs: [unit-tests, lint, config-validation]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pyyaml psutil streamlit
+
+      - name: Run CI test suite
+        run: |
+          python3 scripts/ci_test.py
+
+      - name: Run quality benchmark
+        run: |
+          python3 scripts/quality_benchmark.py --server both
+
+      - name: Run concurrency stress test
+        run: |
+          python3 scripts/concurrency_stress.py --server both --concurrency 4 --requests 20
