@@ -530,7 +530,10 @@ def main():
         print(format_prometheus(metrics))
         return 0
 
-    with socketserver.TCPServer(("0.0.0.0", args.port), MetricsHandler) as httpd:
+    class ReusableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    with ReusableTCPServer(("0.0.0.0", args.port), MetricsHandler) as httpd:
         print(f"NPU metrics exporter listening on port {args.port}")
         print(f"  Scraping NPU server at {args.npu_host}:{args.npu_port}")
         print(f"  Metrics endpoint: http://0.0.0.0:{args.port}/metrics")
