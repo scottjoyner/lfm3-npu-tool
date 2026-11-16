@@ -86,6 +86,7 @@ def main():
     check(any("health.timer" in t for t in timers), "Health timer exists")
     check(any("watchdog.timer" in t for t in timers), "Watchdog timer exists")
     check(any("doctor.timer" in t for t in timers), "Doctor timer exists")
+    check(any("quality-monitor.timer" in t for t in timers), "Quality monitor timer exists")
 
     # 3. Server health
     print("\n--- Server Health ---")
