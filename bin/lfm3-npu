@@ -289,12 +289,15 @@ def cmd_benchmark_cron(args) -> int:
 def cmd_version_check(args) -> int:
     """Check for FastFlowLM version updates."""
     import subprocess
+    import urllib.request
+    import json
+    import tarfile
+    import shutil
 
     print("Checking FastFlowLM version...", flush=True)
 
     # Check current version from running server
     try:
-        import urllib.request, json
         data = json.loads(urllib.request.urlopen(
             "http://127.0.0.1:1239/v1/models", timeout=10
         ).read().decode("utf-8"))
@@ -307,7 +310,6 @@ def cmd_version_check(args) -> int:
 
     # Check latest release from GitHub
     try:
-        import urllib.request, json
         req = urllib.request.Request(
             "https://api.github.com/repos/ROCm/FastFlowLM/releases/latest",
             headers={"User-Agent": "lfm3-npu-tool"}
@@ -331,13 +333,130 @@ def cmd_version_check(args) -> int:
                         break
                 if linux_asset:
                     download_url = linux_asset["browser_download_url"]
-                    print(f"  Download URL: {download_url}")
-                    print(f"  Manual upgrade: wget {download_url} && tar xzf fastflowlm_*.tar.gz")
-                    print(f"  Then copy /tmp/flm to /tmp/flm-real and restart NPU service")
+                    asset_name = linux_asset["name"]
+                    print(f"  Asset: {asset_name}")
+                    print(f"  URL: {download_url}")
+
+                    # Stop NPU server before upgrade
+                    print(f"  Stopping NPU server...")
+                    subprocess.run(
+                        ["systemctl", "--user", "stop", "lfm3-npu-npu.service"],
+                        capture_output=True, text=True, timeout=30
+                    )
+
+                    # Download to /tmp
+                    download_path = f"/tmp/{asset_name}"
+                    try:
+                        urllib.request.urlretrieve(download_url, download_path)
+                        print(f"  Downloaded to {download_path}")
+                    except Exception as e:
+                        print(f"  Download failed: {e}")
+                        print(f"  Restarting NPU server...")
+                        subprocess.run(
+                            ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        return 1
+
+                    # Extract
+                    extract_dir = "/tmp/flm-upgrade"
+                    os.makedirs(extract_dir, exist_ok=True)
+                    try:
+                        with tarfile.open(download_path, "r:gz") as tar:
+                            tar.extractall(extract_dir)
+                        print(f"  Extracted to {extract_dir}")
+                    except Exception as e:
+                        print(f"  Extraction failed: {e}")
+                        print(f"  Restarting NPU server...")
+                        subprocess.run(
+                            ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        return 1
+
+                    # Find the flm binary in extracted files
+                    flm_binary = None
+                    for root, dirs, files in os.walk(extract_dir):
+                        for f in files:
+                            if f == "flm" or f.startswith("flm-"):
+                                candidate = os.path.join(root, f)
+                                if os.access(candidate, os.X_OK):
+                                    flm_binary = candidate
+                                    break
+                        if flm_binary:
+                            break
+
+                    if flm_binary:
+                        # Back up old binary
+                        old_backup = f"/tmp/flm.backup.{int(__import__('time').time())}"
+                        shutil.copy2("/tmp/flm", old_backup)
+                        print(f"  Backed up old binary to {old_backup}")
+
+                        # Install new binary
+                        shutil.copy2(flm_binary, "/tmp/flm")
+                        os.chmod("/tmp/flm", 0o755)
+                        print(f"  Installed new binary from {flm_binary}")
+
+                        # Find and copy liblfm3_npu.so if present
+                        for root, dirs, files in os.walk(extract_dir):
+                            for f in files:
+                                if "liblfm3_npu" in f and f.endswith(".so"):
+                                    src = os.path.join(root, f)
+                                    shutil.copy2(src, "/tmp/lib/")
+                                    print(f"  Copied {f} to /tmp/lib/")
+                                    break
+
+                        # Restart NPU server
+                        print(f"  Starting NPU server...")
+                        result = subprocess.run(
+                            ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        if result.returncode == 0:
+                            print(f"  NPU server started successfully.")
+                            # Verify
+                            time.sleep(5)
+                            try:
+                                data = json.loads(urllib.request.urlopen(
+                                    "http://127.0.0.1:1239/v1/models", timeout=10
+                                ).read().decode("utf-8"))
+                                models = data.get("data", [])
+                                lfm = [m for m in models if "lfm3" in str(m.get("id", ""))]
+                                if lfm:
+                                    print(f"  Upgrade verified: {lfm[0]['id']} responding")
+                                else:
+                                    print(f"  WARNING: NPU server running but no lfm3 model found")
+                            except Exception as e:
+                                print(f"  WARNING: Could not verify upgrade: {e}")
+                        else:
+                            print(f"  Failed to start NPU server: {result.stderr}")
+                            print(f"  Rollback: restoring old binary...")
+                            shutil.copy2(old_backup, "/tmp/flm")
+                            os.chmod("/tmp/flm", 0o755)
+                            subprocess.run(
+                                ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
+                                capture_output=True, text=True, timeout=30
+                            )
+                            return 1
+                    else:
+                        print("  Could not find flm binary in extracted archive")
+                        print("  Restarting NPU server...")
+                        subprocess.run(
+                            ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        return 1
+
+                    # Cleanup
+                    try:
+                        shutil.rmtree(extract_dir)
+                        os.remove(download_path)
+                    except Exception:
+                        pass
                 else:
                     print("  No Linux release asset found")
             else:
-                print("  Run 'lfm3-npu version-check --upgrade' to see download instructions")
+                print("  Run 'lfm3-npu version-check --upgrade' to download and install")
         else:
             print(f"  Already on latest version ({current})")
     except Exception as e:
@@ -736,6 +855,8 @@ def cmd_doctor(args) -> int:
     import subprocess
     import shutil
 
+    auto_fix = args.fix
+
     # Source environment from env file if available (for cron/systemd context)
     env_file = "/media/scott/data/lfm3-npu-tool/etc/lfm3-npu-env.sh"
     if os.path.exists(env_file):
@@ -876,20 +997,80 @@ def cmd_doctor(args) -> int:
         print(f"DOCTOR: {len(issues)} issue(s) found")
         for i, issue in enumerate(issues, 1):
             print(f"  {i}. {issue}")
-        print("\nRecommended actions:")
-        if any("FLM binary" in i for i in issues):
-            print("  - Download FLM v1.0.12 from https://github.com/ROCm/FastFlowLM/releases/tag/v1.0.12")
-            print("    Extract to /tmp/ and ensure /tmp/flm is executable")
-        if any("NPU engine" in i for i in issues):
-            print("  - Extract liblfm3_npu.so from FLM release to /tmp/lib/")
-        if any("server reachable" in i for i in issues):
-            print("  - Start servers: lfm3-npu server start cpu  lfm3-npu server start npu")
-        if any("Disk space" in i or "/tmp space" in i for i in issues):
-            print("  - Free disk space; use /media/scott/data for large files")
-        if any("LD_LIBRARY_PATH" in i for i in issues):
-            print("  - Export LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib:$LD_LIBRARY_PATH")
-            print("    (Only needed when starting NPU server manually)")
-        return 1
+
+        if auto_fix:
+            print("\n🔧 Auto-fixing issues...")
+            fixed = []
+
+            # Fix: restart unreachable servers
+            if any("server reachable" in i for i in issues):
+                for sname in ["cpu", "npu"]:
+                    if any(f"{sname.upper()} server reachable" in i for i in issues):
+                        print(f"  Restarting {sname.upper()} server...")
+                        result = subprocess.run(
+                            ["systemctl", "--user", "restart",
+                             f"lfm3-npu-{sname}.service"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        if result.returncode == 0:
+                            print(f"  ✓ {sname.upper()} server restarted")
+                            fixed.append(sname)
+                        else:
+                            print(f"  ✗ Failed to restart {sname.upper()}: {result.stderr.strip()}")
+
+            # Wait for servers to come up
+            if fixed:
+                print("  Waiting 15s for servers to stabilize...")
+                time.sleep(15)
+
+            # Fix: FLM binary missing
+            if any("FLM binary" in i for i in issues):
+                print("  FLM binary missing - run 'lfm3-npu version-check --upgrade' to download")
+
+            # Fix: NPU engine missing
+            if any("NPU engine" in i for i in issues):
+                print("  NPU engine missing - run 'lfm3-npu version-check --upgrade' to download")
+
+            # Fix: Disk space
+            if any("Disk space" in i or "/tmp space" in i for i in issues):
+                print("  Disk space low - free space manually or move large files to /media/scott/data")
+
+            # Re-check after fixes
+            print("\n🔄 Re-checking after fixes...")
+            remaining_issues = []
+            for sname, host, port, path in [
+                ("cpu", CPU_HOST, CPU_PORT, "/health"),
+                ("npu", NPU_HOST, NPU_PORT, "/v1/models"),
+            ]:
+                try:
+                    http_get(f"http://{host}:{port}{path}", timeout=5)
+                except Exception as e:
+                    remaining_issues.append(f"{sname.upper()} server still unreachable: {e}")
+
+            if remaining_issues:
+                print(f"  {len(remaining_issues)} issue(s) remain after auto-fix")
+                for issue in remaining_issues:
+                    print(f"  - {issue}")
+                return 1
+            else:
+                print("  All issues resolved after auto-fix")
+                return 0
+        else:
+            print("\nRecommended actions:")
+            if any("FLM binary" in i for i in issues):
+                print("  - Download FLM v1.0.12 from https://github.com/ROCm/FastFlowLM/releases/tag/v1.0.12")
+                print("    Extract to /tmp/ and ensure /tmp/flm is executable")
+            if any("NPU engine" in i for i in issues):
+                print("  - Extract liblfm3_npu.so from FLM release to /tmp/lib/")
+            if any("server reachable" in i for i in issues):
+                print("  - Start servers: lfm3-npu server start cpu  lfm3-npu server start npu")
+                print("    Or run: lfm3-npu doctor --fix")
+            if any("Disk space" in i or "/tmp space" in i for i in issues):
+                print("  - Free disk space; use /media/scott/data for large files")
+            if any("LD_LIBRARY_PATH" in i for i in issues):
+                print("  - Export LD_LIBRARY_PATH=/tmp/lib:/opt/xilinx/xrt/lib:$LD_LIBRARY_PATH")
+                print("    (Only needed when starting NPU server manually)")
+            return 1
     else:
         print("DOCTOR: All checks passed. System is healthy.")
         return 0
@@ -1019,6 +1200,8 @@ def main() -> int:
 
     # doctor
     doctor_parser = subparsers.add_parser("doctor", help="Diagnose system health (servers, NPU, env, disk)")
+    doctor_parser.add_argument("--fix", action="store_true",
+                               help="Auto-fix common issues (restart servers, fix env)")
     doctor_parser.set_defaults(func=cmd_doctor)
 
     # watchdog

@@ -11,7 +11,7 @@ Usage:
 
 Checks every interval:
     - CPU server generates correct, non-degraded output
-    - NPU server generates correct, non-degraded output
+    - NPU server generates correct, non-degraded output with reasoning traces
     - Auto-restarts CPU server if quality falls below threshold
 
 Exit codes:
@@ -130,6 +130,12 @@ def check_generation(server, prompt, expected, verbose=False):
             degraded = True
             reasons.append("wrong math")
 
+    # NPU-specific: should produce reasoning traces (Qwen XML format)
+    # Absence of reasoning_content indicates quality degradation
+    if server == "npu" and not reasoning and not content:
+        degraded = True
+        reasons.append("no reasoning trace (NPU quality degraded)")
+
     if verbose:
         log(f"  {server.upper()} '{prompt}' -> '{content[:60]}' "
             f"{'(degraded: ' + ', '.join(reasons) + ')' if degraded else ''}")
@@ -174,6 +180,21 @@ def restart_cpu():
         return False
 
 
+def restart_npu():
+    """Restart the NPU server via systemctl."""
+    log("Restarting NPU server due to quality degradation (no reasoning trace)...")
+    result = subprocess.run(
+        ["systemctl", "--user", "restart", "lfm3-npu-npu.service"],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode == 0:
+        log("NPU server restarted successfully.")
+        return True
+    else:
+        log(f"Failed to restart NPU server: {result.stderr}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="LFM3-1.7B Quality Monitor"
@@ -186,15 +207,16 @@ def main():
                         help="Auto-restart CPU server on quality degradation")
     parser.add_argument("--verbose", action="store_true",
                         help="Verbose output")
-    parser.add_argument("--restart-cooldown", type=int, default=600,
-                        help="Minimum seconds between CPU restarts (default: 600)")
+    parser.add_argument("--restart-cooldown", type=int, default=120,
+                        help="Minimum seconds between CPU restarts (default: 120)")
     args = parser.parse_args()
 
     log("=== LFM3-1.7B Quality Monitor ===")
     log(f"Interval: {args.interval}s, Fix: {args.fix}, Verbose: {args.verbose}")
     log(f"Restart cooldown: {args.restart_cooldown}s")
 
-    last_restart_time = 0
+    last_cpu_restart_time = 0
+    last_npu_restart_time = 0
 
     while True:
         cpu_passed, npu_passed, total, results = run_quality_check(args.verbose)
@@ -215,17 +237,32 @@ def main():
         # Auto-restart CPU on degradation (with cooldown)
         if not cpu_ok and args.fix:
             now = time.time()
-            if now - last_restart_time >= args.restart_cooldown:
+            if now - last_cpu_restart_time >= args.restart_cooldown:
                 log("CPU quality degraded - triggering restart...")
                 if restart_cpu():
-                    last_restart_time = now
+                    last_cpu_restart_time = now
                     log("Waiting 15s for CPU server to stabilize...")
                     time.sleep(15)
                 else:
                     log("CPU restart failed - will retry on next cycle.")
             else:
-                remaining = int(args.restart_cooldown - (now - last_restart_time))
+                remaining = int(args.restart_cooldown - (now - last_cpu_restart_time))
                 log(f"CPU quality degraded but restart in cooldown ({remaining}s remaining)")
+
+        # Auto-restart NPU on reasoning trace loss (with cooldown)
+        if not npu_ok and args.fix:
+            now = time.time()
+            if now - last_npu_restart_time >= args.restart_cooldown:
+                log("NPU quality degraded (no reasoning trace) - triggering restart...")
+                if restart_npu():
+                    last_npu_restart_time = now
+                    log("Waiting 15s for NPU server to stabilize...")
+                    time.sleep(15)
+                else:
+                    log("NPU restart failed - will retry on next cycle.")
+            else:
+                remaining = int(args.restart_cooldown - (now - last_npu_restart_time))
+                log(f"NPU quality degraded but restart in cooldown ({remaining}s remaining)")
 
         if args.once:
             if cpu_ok and npu_ok:
