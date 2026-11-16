@@ -972,6 +972,27 @@ def cmd_doctor(args) -> int:
     check("FLM_MODEL_PATH set", bool(os.environ.get("FLM_MODEL_PATH")),
           "FLM_MODEL_PATH not set (needed for FLM model discovery)")
 
+    # 6b. Config file validation
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "etc", "lfm3-npu-config.yaml")
+    config_exists = os.path.exists(config_path)
+    check("Config file exists", config_exists,
+          f"Config file not found at {config_path}")
+    if config_exists:
+        try:
+            import yaml
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f)
+            check("Config is valid YAML", cfg is not None,
+                  "Config file is not valid YAML")
+            if cfg:
+                check("Config has server section", "server" in cfg,
+                      "Config missing 'server' section")
+                check("Config has model section", "model" in cfg,
+                      "Config missing 'model' section")
+        except Exception as e:
+            check("Config is valid YAML", False, str(e))
+
     # 7. Server health
     manager = ServerManager(load_config())
     for sname, host, port, path in [

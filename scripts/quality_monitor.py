@@ -225,6 +225,7 @@ def main():
     cpu_total_total = 0
     npu_passed_total = 0
     npu_total_total = 0
+    npu_unresponsive_restarts = 0
 
     def write_state():
         """Write quality monitor state to file for metrics exporter."""
@@ -233,6 +234,7 @@ def main():
             state = {
                 "cpu_restarts": cpu_restarts,
                 "npu_restarts": npu_restarts,
+                "npu_unresponsive_restarts": npu_unresponsive_restarts,
                 "last_check": time.time(),
                 "cpu_passed": cpu_passed_total,
                 "cpu_total": cpu_total_total,
@@ -244,11 +246,48 @@ def main():
         except Exception:
             pass
 
+    def check_server_reachable(server: str) -> bool:
+        """Check if a server is reachable via its health endpoint."""
+        if server == "cpu":
+            url = f"http://{CPU_HOST}:{CPU_PORT}/health"
+        else:
+            url = f"http://{NPU_HOST}:{NPU_PORT}/v1/models"
+        try:
+            data, err = fetch_json(url, timeout=5)
+            if server == "cpu":
+                return data is not None and data.get("status") == "healthy"
+            else:
+                return data is not None and "data" in data and len(data["data"]) > 0
+        except Exception:
+            return False
+
     while True:
         cpu_passed, npu_passed, total, results = run_quality_check(args.verbose)
 
         cpu_ok = cpu_passed == total
         npu_ok = npu_passed == total
+
+        # Check NPU server responsiveness (not just reasoning quality)
+        npu_reachable = check_server_reachable("npu")
+        cpu_reachable = check_server_reachable("cpu")
+
+        if not npu_reachable:
+            log("NPU server unreachable - triggering restart...")
+            if restart_npu():
+                npu_unresponsive_restarts += 1
+                log("Waiting 15s for NPU server to stabilize...")
+                time.sleep(15)
+            else:
+                log("NPU restart failed - will retry on next cycle.")
+
+        if not cpu_reachable:
+            log("CPU server unreachable - triggering restart...")
+            if restart_cpu():
+                cpu_restarts += 1
+                log("Waiting 15s for CPU server to stabilize...")
+                time.sleep(15)
+            else:
+                log("CPU restart failed - will retry on next cycle.")
 
         cpu_passed_total += cpu_passed
         cpu_total_total += total

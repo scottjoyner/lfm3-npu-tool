@@ -132,3 +132,25 @@ groups:
         annotations:
           summary: "LFM3-1.7B disk usage critical"
           description: "Disk usage is {{ $value }}%, above 95% threshold."
+
+      # NPU unresponsive restarts (quality monitor detected unreachable NPU)
+      - alert: LFM3NPUUnresponsiveRestarts
+        expr: increases(lfm3_qm_npu_unresponsive_restarts[1h]) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server unresponsive restarts"
+          description: "Quality monitor restarted the NPU server {{ $value }} time(s) in the last hour due to unresponsiveness."
+
+      # CPU unresponsive restarts (quality monitor detected unreachable CPU)
+      - alert: LFM3CPUUnresponsiveRestarts
+        expr: increases(lfm3_qm_cpu_restarts[1h]) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server unresponsive restarts"
+          description: "Quality monitor restarted the CPU server {{ $value }} time(s) in the last hour due to unresponsiveness."

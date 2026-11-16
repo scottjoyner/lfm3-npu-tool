@@ -109,6 +109,9 @@ def main():
         check("lfm3_npu_up 1" in body, "NPU up metric present")
         check("lfm3_cpu_up" in body, "CPU up metric present")
         check("lfm3_npu_lfm3_model_available 1" in body, "NPU model available metric present")
+        check("lfm3_disk_used_percent" in body, "Disk metrics present")
+        check("lfm3_qm_cpu_restarts" in body, "Quality monitor CPU restarts metric present")
+        check("lfm3_qm_npu_restarts" in body, "Quality monitor NPU restarts metric present")
     except Exception as e:
         check(False, f"Metrics exporter reachable: {e}")
 

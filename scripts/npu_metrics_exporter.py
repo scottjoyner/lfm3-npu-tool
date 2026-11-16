@@ -98,6 +98,8 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_qm_npu_passed counter
 # HELP lfm3_qm_npu_total Total NPU quality checks
 # TYPE lfm3_qm_npu_total counter
+# HELP lfm3_qm_npu_unresponsive_restarts Total NPU unresponsive restarts by quality monitor
+# TYPE lfm3_qm_npu_unresponsive_restarts counter
 """
 
 
@@ -143,6 +145,7 @@ class MetricsCollector:
         # Quality monitor metrics cache
         self._qm_cpu_restarts = 0
         self._qm_npu_restarts = 0
+        self._qm_npu_unresponsive_restarts = 0
         self._qm_last_check = 0.0
         self._qm_cpu_passed = 0
         self._qm_cpu_total = 0
@@ -160,6 +163,7 @@ class MetricsCollector:
                     state = json.load(f)
                 self._qm_cpu_restarts = state.get("cpu_restarts", 0)
                 self._qm_npu_restarts = state.get("npu_restarts", 0)
+                self._qm_npu_unresponsive_restarts = state.get("npu_unresponsive_restarts", 0)
                 self._qm_last_check = state.get("last_check", 0.0)
                 self._qm_cpu_passed = state.get("cpu_passed", 0)
                 self._qm_cpu_total = state.get("cpu_total", 0)
@@ -388,6 +392,7 @@ class MetricsCollector:
             "qm_cpu_total": self._qm_cpu_total,
             "qm_npu_passed": self._qm_npu_passed,
             "qm_npu_total": self._qm_npu_total,
+            "qm_npu_unresponsive_restarts": self._qm_npu_unresponsive_restarts,
         }
 
 
@@ -432,6 +437,7 @@ def format_prometheus(metrics: dict) -> str:
     lines.append(f'lfm3_qm_cpu_total {metrics["qm_cpu_total"]}')
     lines.append(f'lfm3_qm_npu_passed {metrics["qm_npu_passed"]}')
     lines.append(f'lfm3_qm_npu_total {metrics["qm_npu_total"]}')
+    lines.append(f'lfm3_qm_npu_unresponsive_restarts {metrics["qm_npu_unresponsive_restarts"]}')
 
     # Request duration histogram
     durations = metrics["durations"]

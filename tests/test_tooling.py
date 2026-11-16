@@ -124,6 +124,10 @@ def test_prometheus_rules_valid_yaml():
     assert "LFM3CPUServerDown" in content, "Should have CPU down alert"
     assert "LFM3CPUDecodeSlow" in content, "Should have CPU decode slow alert"
     assert "LFM3CPUUptimeHigh" in content, "Should have CPU uptime high alert"
+    assert "LFM3DiskUsageHigh" in content, "Should have disk usage high alert"
+    assert "LFM3DiskUsageCritical" in content, "Should have disk usage critical alert"
+    assert "LFM3NPUUnresponsiveRestarts" in content, "Should have NPU unresponsive restarts alert"
+    assert "LFM3CPUUnresponsiveRestarts" in content, "Should have CPU unresponsive restarts alert"
     print("  ✓ Prometheus rules YAML is valid with all alerts")
 
 
@@ -227,8 +231,22 @@ def test_metrics_exporter_has_quality_monitor_metrics():
         content = f.read()
     assert "lfm3_qm_cpu_restarts" in content, "Should expose CPU restarts"
     assert "lfm3_qm_npu_restarts" in content, "Should expose NPU restarts"
+    assert "lfm3_qm_npu_unresponsive_restarts" in content, "Should expose NPU unresponsive restarts"
     assert "_read_quality_monitor_state" in content, "Should read QM state"
     print("  ✓ Metrics exporter exposes quality monitor metrics")
+
+
+def test_quality_monitor_has_unresponsive_detection():
+    """Test that quality monitor detects unresponsive servers."""
+    import os
+    script_path = os.path.join(SERVER_DIR, "scripts", "quality_monitor.py")
+    assert os.path.exists(script_path), "Quality monitor should exist"
+    with open(script_path) as f:
+        content = f.read()
+    assert "check_server_reachable" in content, "Should check server reachability"
+    assert "npu_unresponsive_restarts" in content, "Should track NPU unresponsive restarts"
+    assert "unreachable" in content.lower(), "Should detect unreachable servers"
+    print("  ✓ Quality monitor has unresponsive detection")
 
 
 def test_quality_monitor_writes_state():
@@ -287,6 +305,7 @@ def main():
         test_metrics_exporter_has_quality_monitor_metrics,
         test_quality_monitor_writes_state,
         test_startup_validate_service_exists,
+        test_quality_monitor_has_unresponsive_detection,
     ]
 
     passed = 0
