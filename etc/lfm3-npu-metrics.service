@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/npu_metrics_exporter.py --port 9190 --npu-port 1239 --cpu-port 1238 --cpu-host 127.0.0.1 --interval 15
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/npu_metrics_exporter.py --port 9190 --npu-port 1239 --cpu-port 1238 --cpu-host 127.0.0.1 --interval 15 --disk-paths /,/media/scott/data,/tmp
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=300

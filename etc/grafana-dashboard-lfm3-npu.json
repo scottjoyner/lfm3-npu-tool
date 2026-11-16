@@ -322,6 +322,49 @@
             {"color": "green", "value": 1}
           ]
         }
+      },
+      {
+        "id": 18,
+        "title": "Disk Usage %",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 0, "y": 15},
+        "targets": [
+          {"expr": "lfm3_disk_used_percent", "legendFormat": "Used %"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "percent",
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 75},
+            {"color": "red", "value": 90}
+          ]
+        }
+      },
+      {
+        "id": 19,
+        "title": "Disk Free GB",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 4, "y": 15},
+        "targets": [
+          {"expr": "lfm3_disk_free_bytes / 1024 / 1024 / 1024", "legendFormat": "Free GB"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "bytes",
+          "decimals": 1,
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 50},
+            {"color": "red", "value": 20}
+          ]
+        }
       }
     ],
     "time": {"from": "now-1h", "to": "now"},

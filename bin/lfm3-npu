@@ -22,6 +22,7 @@ Commands:
     smoke-test      Run smoke test / validation of all servers
     quality-monitor Run quality monitor with auto-restart on degradation
     version-check   Check for FastFlowLM version updates
+    benchmark-cron  Run benchmark cron job (periodic performance validation)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -41,6 +42,7 @@ Examples:
     lfm3-npu quality-monitor --fix   # Monitor quality with auto-restart
     lfm3-npu version-check           # Check for FastFlowLM updates
     lfm3-npu version-check --upgrade # Show upgrade instructions
+    lfm3-npu benchmark-cron          # Run periodic benchmark
 """
 
 import argparse
@@ -267,6 +269,20 @@ def cmd_quality_monitor(args) -> int:
 
     print("Running quality monitor...", flush=True)
     result = subprocess.run(cmd, capture_output=False)
+    return result.returncode
+
+
+def cmd_benchmark_cron(args) -> int:
+    """Run benchmark cron job (periodic performance validation)."""
+    import subprocess
+
+    script = os.path.join(SERVER_DIR, "scripts", "benchmark_cron.py")
+    if not os.path.exists(script):
+        print(f"Benchmark cron script not found: {script}", flush=True)
+        return 1
+
+    print("Running benchmark cron job...", flush=True)
+    result = subprocess.run(["python3", script], capture_output=False)
     return result.returncode
 
 
@@ -753,8 +769,29 @@ def cmd_doctor(args) -> int:
         npu_found = "Strix Halo" in result.stdout or "aie2p" in result.stdout
         check("NPU hardware detected", npu_found,
               "No Strix Halo NPU found in xrt-smi output")
+        if npu_found:
+            # Extract NPU device details
+            for line in result.stdout.split("\n"):
+                if "BDF" in line or "firmware" in line.lower() or "XDNA" in line:
+                    print(f"    NPU detail: {line.strip()}")
     except Exception as e:
         check("NPU hardware detected", False, f"xrt-smi failed: {e}")
+
+    # 1b. XRT version
+    try:
+        result = subprocess.run(
+            ["xrt-smi", "version"], capture_output=True, text=True, timeout=10
+        )
+        xrt_version = result.stdout.strip() if result.returncode == 0 else "unknown"
+        check("XRT version available", xrt_version != "unknown",
+              f"XRT version: {xrt_version[:80] if xrt_version != 'unknown' else 'not available'}")
+    except Exception:
+        check("XRT version available", False, "xrt-smi version failed")
+
+    # 1c. NPU device node
+    npu_dev = "/dev/accel/accel0"
+    check("NPU device node exists", os.path.exists(npu_dev),
+          f"{npu_dev} not found (NPU may not be accessible)")
 
     # 2. FLM binary
     flm_binary = "/tmp/flm"
@@ -762,6 +799,16 @@ def cmd_doctor(args) -> int:
           f"{flm_binary} not found")
     check("FLM binary executable", os.access(flm_binary, os.X_OK) if os.path.exists(flm_binary) else False,
           f"{flm_binary} not executable")
+    # FLM version
+    try:
+        result = subprocess.run(
+            [flm_binary, "--version"], capture_output=True, text=True, timeout=10
+        )
+        flm_version = result.stdout.strip() or result.stderr.strip()
+        check("FLM version detectable", bool(flm_version),
+              f"FLM version: {flm_version[:80] if flm_version else 'not detectable'}")
+    except Exception:
+        check("FLM version detectable", False, "Could not run flm --version")
 
     # 3. FLM NPU engine
     npu_engine = "/tmp/lib/liblfm3_npu.so"
@@ -785,6 +832,8 @@ def cmd_doctor(args) -> int:
           "XILINX_XRT not set (needed for FLM)")
     check("LD_LIBRARY_PATH has /tmp/lib", "/tmp/lib" in os.environ.get("LD_LIBRARY_PATH", ""),
           "/tmp/lib not in LD_LIBRARY_PATH (needed for liblfm3_npu.so)")
+    check("FLM_MODEL_PATH set", bool(os.environ.get("FLM_MODEL_PATH")),
+          "FLM_MODEL_PATH not set (needed for FLM model discovery)")
 
     # 7. Server health
     manager = ServerManager(load_config())
@@ -1050,6 +1099,11 @@ def main() -> int:
     quality_parser.add_argument("--restart-cooldown", type=int, default=600,
                                 help="Min seconds between CPU restarts (default: 600)")
     quality_parser.set_defaults(func=cmd_quality_monitor)
+
+    bench_cron_parser = subparsers.add_parser(
+        "benchmark-cron", help="Run benchmark cron job (periodic performance validation)"
+    )
+    bench_cron_parser.set_defaults(func=cmd_benchmark_cron)
 
     version_parser = subparsers.add_parser(
         "version-check", help="Check for FastFlowLM version updates"

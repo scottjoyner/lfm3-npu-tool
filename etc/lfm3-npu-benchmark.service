@@ -1,0 +1,13 @@
+[Unit]
+Description=LFM3-1.7B NPU Benchmark (periodic performance validation)
+After=network-online.target lfm3-npu-cpu.service lfm3-npu-npu.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/scripts/benchmark_cron.py
+Environment=TMPDIR=/media/scott/data/tmp
+Environment=PATH=/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

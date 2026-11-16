@@ -110,3 +110,25 @@ groups:
         annotations:
           summary: "LFM3-1.7B CPU server overloaded"
           description: "CPU server has no free request slots available."
+
+      # Disk usage high
+      - alert: LFM3DiskUsageHigh
+        expr: lfm3_disk_used_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B disk usage high"
+          description: "Disk usage is {{ $value }}%, above 85% threshold."
+
+      # Disk usage critical
+      - alert: LFM3DiskUsageCritical
+        expr: lfm3_disk_used_percent > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B disk usage critical"
+          description: "Disk usage is {{ $value }}%, above 95% threshold."

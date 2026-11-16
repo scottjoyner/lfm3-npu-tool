@@ -76,6 +76,14 @@ METRICS_HEADER = """# HELP lfm3_npu_up Whether the NPU server is reachable
 # TYPE lfm3_cpu_active_slots gauge
 # HELP lfm3_cpu_free_slots CPU server free request slots
 # TYPE lfm3_cpu_free_slots gauge
+# HELP lfm3_disk_total_bytes Total disk space in bytes
+# TYPE lfm3_disk_total_bytes gauge
+# HELP lfm3_disk_used_bytes Used disk space in bytes
+# TYPE lfm3_disk_used_bytes gauge
+# HELP lfm3_disk_free_bytes Free disk space in bytes
+# TYPE lfm3_disk_free_bytes gauge
+# HELP lfm3_disk_used_percent Disk usage percent
+# TYPE lfm3_disk_used_percent gauge
 """
 
 
@@ -86,7 +94,8 @@ class MetricsCollector:
                  cpu_port: int = 1238, cpu_host: str = "127.0.0.1",
                  test_prompt: str = DEFAULT_TEST_PROMPT,
                  max_duration_samples: int = 1000,
-                 warmup_seconds: int = 30):
+                 warmup_seconds: int = 30,
+                 disk_paths: list[str] | None = None):
         self.npu_port = npu_port
         self.npu_host = npu_host
         self.cpu_port = cpu_port
@@ -111,6 +120,12 @@ class MetricsCollector:
         self._cpu_avg_decode_ms = 0.0
         self._cpu_active_slots = 0
         self._cpu_free_slots = 0
+        # Disk metrics cache
+        self._disk_paths = disk_paths or ["/", "/media/scott/data", "/tmp"]
+        self._disk_total_bytes = 0
+        self._disk_used_bytes = 0
+        self._disk_free_bytes = 0
+        self._disk_used_percent = 0.0
 
     def fetch_json(self, url: str, timeout: float = 10.0):
         """Fetch JSON from URL, return None on failure."""
@@ -143,6 +158,28 @@ class MetricsCollector:
                 }
         except Exception:
             return None
+
+    def _collect_disk_metrics(self):
+        """Collect disk usage metrics for configured paths."""
+        import shutil
+
+        total = 0
+        used = 0
+        free = 0
+        for path in self._disk_paths:
+            try:
+                disk = shutil.disk_usage(path)
+                total += disk.total
+                used += disk.used
+                free += disk.free
+            except Exception:
+                continue
+
+        if total > 0:
+            self._disk_total_bytes = total
+            self._disk_used_bytes = used
+            self._disk_free_bytes = free
+            self._disk_used_percent = (used / total) * 100.0
 
     def send_test_request(self) -> dict:
         """Send a test request to the NPU server and measure duration."""
@@ -255,6 +292,9 @@ class MetricsCollector:
             self._cpu_active_slots = 0
             self._cpu_free_slots = 0
 
+        # Collect disk usage metrics
+        self._collect_disk_metrics()
+
         # Process metrics
         proc = self.find_npu_process()
         process_cpu_percent = 0
@@ -293,6 +333,10 @@ class MetricsCollector:
             "cpu_avg_decode_ms": self._cpu_avg_decode_ms,
             "cpu_active_slots": self._cpu_active_slots,
             "cpu_free_slots": self._cpu_free_slots,
+            "disk_total_bytes": self._disk_total_bytes,
+            "disk_used_bytes": self._disk_used_bytes,
+            "disk_free_bytes": self._disk_free_bytes,
+            "disk_used_percent": self._disk_used_percent,
         }
 
 
@@ -322,6 +366,12 @@ def format_prometheus(metrics: dict) -> str:
     lines.append(f'lfm3_cpu_avg_decode_ms {metrics["cpu_avg_decode_ms"]}')
     lines.append(f'lfm3_cpu_active_slots {metrics["cpu_active_slots"]}')
     lines.append(f'lfm3_cpu_free_slots {metrics["cpu_free_slots"]}')
+
+    # Disk usage metrics
+    lines.append(f'lfm3_disk_total_bytes {metrics["disk_total_bytes"]}')
+    lines.append(f'lfm3_disk_used_bytes {metrics["disk_used_bytes"]}')
+    lines.append(f'lfm3_disk_free_bytes {metrics["disk_free_bytes"]}')
+    lines.append(f'lfm3_disk_used_percent {metrics["disk_used_percent"]}')
 
     # Request duration histogram
     durations = metrics["durations"]
@@ -364,6 +414,8 @@ def main():
                         help="CPU server port (default: 1238)")
     parser.add_argument("--cpu-host", default="127.0.0.1",
                         help="CPU server host (default: 127.0.0.1)")
+    parser.add_argument("--disk-paths", type=str, default="/,/media/scott/data,/tmp",
+                        help="Comma-separated disk paths to monitor (default: /,/media/scott/data,/tmp)")
     parser.add_argument("--test-prompt", default=DEFAULT_TEST_PROMPT,
                         help=f"Test prompt for duration measurement (default: '{DEFAULT_TEST_PROMPT}')")
     parser.add_argument("--max-samples", type=int, default=1000,
@@ -382,6 +434,7 @@ def main():
         npu_host=args.npu_host,
         cpu_port=args.cpu_port,
         cpu_host=args.cpu_host,
+        disk_paths=args.disk_paths.split(","),
         test_prompt=args.test_prompt,
         max_duration_samples=args.max_samples,
     )
