@@ -105,7 +105,8 @@ echo "[6/8] Installing user systemd services..."
 for svc in lfm3-npu-cpu.service lfm3-npu-npu.service lfm3-npu-metrics.service \
            lfm3-npu-watchdog.service lfm3-npu-watchdog.timer \
            lfm3-npu-doctor.service lfm3-npu-doctor.timer \
-           lfm3-npu-health.service lfm3-npu-health.timer; do
+           lfm3-npu-health.service lfm3-npu-health.timer \
+           lfm3-npu-quality-monitor.service lfm3-npu-quality-monitor.timer; do
     if [ -f "${TOOLING_DIR}/etc/$svc" ]; then
         cp "${TOOLING_DIR}/etc/$svc" "${HOME}/.config/systemd/user/$svc"
         echo "  Installed: ${HOME}/.config/systemd/user/$svc"
@@ -143,7 +144,7 @@ echo "  Symlinks created."
 # Install utility scripts
 echo ""
 echo "[9/9] Installing utility scripts..."
-for script in scripts/smoke_test.py scripts/ci_test.py scripts/quality_benchmark.py scripts/concurrency_stress.py scripts/watchdog-cron.sh scripts/health_check.py scripts/npu_metrics_exporter.py; do
+for script in scripts/smoke_test.py scripts/ci_test.py scripts/quality_benchmark.py scripts/concurrency_stress.py scripts/watchdog-cron.sh scripts/health_check.py scripts/npu_metrics_exporter.py scripts/quality_monitor.py; do
     if [ -f "${TOOLING_DIR}/${script}" ]; then
         chmod +x "${TOOLING_DIR}/${script}"
         echo "  Installed: ${script}"

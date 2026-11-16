@@ -246,6 +246,85 @@
           ]
         }
       }
+      },
+      # CPU Server Status panel - inserted before closing bracket
+      {
+        "id": 14,
+        "title": "CPU Server Status",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 0, "y": 12},
+        "targets": [
+          {"expr": "lfm3_cpu_up", "legendFormat": "CPU Server Up"},
+          {"expr": "lfm3_cpu_uptime_seconds / 3600", "legendFormat": "Uptime (h)"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "thresholdsMode": "absolute",
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 0}
+          ]
+        }
+      },
+      {
+        "id": 15,
+        "title": "CPU Avg Decode Time",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 4, "y": 12},
+        "targets": [
+          {"expr": "lfm3_cpu_avg_decode_ms", "legendFormat": "ms/decode"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "unit": "ms",
+          "decimals": 1,
+          "thresholds": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 150},
+            {"color": "red", "value": 200}
+          ]
+        }
+      },
+      {
+        "id": 16,
+        "title": "CPU Active Slots",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 8, "y": 12},
+        "targets": [
+          {"expr": "lfm3_cpu_active_slots", "legendFormat": "Active"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""}
+        }
+      },
+      {
+        "id": 17,
+        "title": "CPU Free Slots",
+        "type": "stat",
+        "gridPos": {"h": 3, "w": 4, "x": 12, "y": 12},
+        "targets": [
+          {"expr": "lfm3_cpu_free_slots", "legendFormat": "Free"}
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "reduceOptions": {"values": ["last"], "calcs": ["lastNotNull"], "fields": ""},
+          "thresholds": [
+            {"color": "red", "value": null},
+            {"color": "green", "value": 1}
+          ]
+        }
+      }
     ],
     "time": {"from": "now-1h", "to": "now"},
     "timepicker": {

@@ -252,6 +252,42 @@ The smoke test checks:
 - Generation quality on both servers (correct answers, no degradation)
 - Watchdog can run successfully
 
+### Quality Monitor (Auto-Restart on Degradation)
+
+The CPU server (ONNX Runtime) suffers from output quality degradation after
+extended uptime (~20 min). The quality monitor continuously checks generation
+quality and auto-restarts the CPU server when degradation is detected:
+
+```bash
+# CLI quality monitor (runs continuously with auto-restart)
+lfm3-npu quality-monitor --fix --verbose
+
+# One-shot check (for CI/cron)
+lfm3-npu quality-monitor --once --fix
+
+# Or run directly
+python3 scripts/quality_monitor.py --once --fix --verbose
+```
+
+The quality monitor:
+- Tests generation quality on both CPU and NPU servers every interval
+- Detects conversation loops, numbered list explosions, repeated characters, wrong math
+- Auto-restarts CPU server when quality falls below threshold
+- Respects a restart cooldown (default 10 min) to prevent restart loops
+
+### Systemd Services (Quality Monitor)
+
+```bash
+# Enable and start quality monitor
+systemctl --user enable lfm3-npu-quality-monitor.service
+systemctl --user enable lfm3-npu-quality-monitor.timer
+systemctl --user start lfm3-npu-quality-monitor.timer
+
+# Status
+systemctl --user status lfm3-npu-quality-monitor.service
+systemctl --user status lfm3-npu-quality-monitor.timer
+```
+
 ### Operations Runbook
 
 See `OPERATIONS_RUNBOOK.md` for complete deployment, monitoring,

@@ -69,7 +69,7 @@ groups:
 
       # CPU server down
       - alert: LFM3CPUServerDown
-        expr: up{job="lfm3-cpu"} == 0
+        expr: lfm3_cpu_up == 0
         for: 30s
         labels:
           severity: critical
@@ -77,3 +77,36 @@ groups:
         annotations:
           summary: "LFM3-1.7B CPU server is down"
           description: "The CPU inference server on port 1238 has been unreachable for more than 30 seconds."
+
+      # CPU decode speed degraded (high avg_decode_ms means slow)
+      - alert: LFM3CPUDecodeSlow
+        expr: lfm3_cpu_avg_decode_ms > 200 and lfm3_cpu_up == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU decode speed degraded"
+          description: "CPU average decode time is {{ $value }} ms, above 200 ms threshold."
+
+      # CPU server uptime high (quality degradation risk after ~20 min)
+      - alert: LFM3CPUUptimeHigh
+        expr: lfm3_cpu_uptime_seconds > 7200 and lfm3_cpu_up == 1
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server uptime high (quality degradation risk)"
+          description: "CPU server has been running for {{ $value }} seconds. Quality degradation is likely after ~1200s. Consider restarting."
+
+      # CPU free slots exhausted (overloaded)
+      - alert: LFM3CPUOverloaded
+        expr: lfm3_cpu_free_slots == 0 and lfm3_cpu_up == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server overloaded"
+          description: "CPU server has no free request slots available."

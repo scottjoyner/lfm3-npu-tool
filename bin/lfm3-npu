@@ -20,6 +20,7 @@ Commands:
     watchdog        Run server watchdog (auto-restart unresponsive servers)
     fleet-monitor   Fleet monitoring across servers
     smoke-test      Run smoke test / validation of all servers
+    quality-monitor Run quality monitor with auto-restart on degradation
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -235,6 +236,32 @@ def cmd_smoke_test(args) -> int:
         cmd.append("--fix")
 
     print("Running smoke test...", flush=True)
+    result = subprocess.run(cmd, capture_output=False)
+    return result.returncode
+
+
+def cmd_quality_monitor(args) -> int:
+    """Run quality monitor with auto-restart on degradation."""
+    import subprocess
+
+    script = os.path.join(SERVER_DIR, "scripts", "quality_monitor.py")
+    if not os.path.exists(script):
+        print(f"Quality monitor script not found: {script}", flush=True)
+        return 1
+
+    cmd = ["python3", script]
+    if args.interval:
+        cmd.extend(["--interval", str(args.interval)])
+    if args.once:
+        cmd.append("--once")
+    if args.fix:
+        cmd.append("--fix")
+    if args.verbose:
+        cmd.append("--verbose")
+    if args.restart_cooldown:
+        cmd.extend(["--restart-cooldown", str(args.restart_cooldown)])
+
+    print("Running quality monitor...", flush=True)
     result = subprocess.run(cmd, capture_output=False)
     return result.returncode
 
@@ -944,6 +971,21 @@ def main() -> int:
     smoke_parser.add_argument("--fix", action="store_true",
                               help="Attempt to restart unhealthy servers via systemctl")
     smoke_parser.set_defaults(func=cmd_smoke_test)
+
+    quality_parser = subparsers.add_parser(
+        "quality-monitor", help="Run quality monitor with auto-restart on degradation"
+    )
+    quality_parser.add_argument("--interval", type=int, default=300,
+                                help="Check interval in seconds (default: 300)")
+    quality_parser.add_argument("--once", action="store_true",
+                                help="Run one check and exit")
+    quality_parser.add_argument("--fix", action="store_true",
+                                help="Auto-restart CPU server on quality degradation")
+    quality_parser.add_argument("--verbose", action="store_true",
+                                help="Verbose output")
+    quality_parser.add_argument("--restart-cooldown", type=int, default=600,
+                                help="Min seconds between CPU restarts (default: 600)")
+    quality_parser.set_defaults(func=cmd_quality_monitor)
 
     args = parser.parse_args()
 
