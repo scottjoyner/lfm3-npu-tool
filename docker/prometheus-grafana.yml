@@ -4,7 +4,7 @@
 #   docker-compose -f docker/prometheus-grafana.yml up -d
 #
 # Access:
-#   Grafana: http://localhost:3000 (admin/admin)
+#   Grafana: http://localhost:3000 (admin / user-supplied GRAFANA_ADMIN_PASSWORD)
 #   Prometheus: http://localhost:9090
 #
 # Scrape config targets:
@@ -22,10 +22,12 @@ services:
       - '--web.enable-lifecycle'
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./docker/prometheus-rules.yml:/etc/prometheus/rules/prometheus-rules.yml:ro
+      - ./prometheus-rules.yml:/etc/prometheus/rules/prometheus-rules.yml:ro
       - prometheus_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     restart: unless-stopped
 
   grafana:
@@ -33,13 +35,13 @@ services:
     container_name: grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be provided before starting the monitoring stack}
+      - GF_SECURITY_ALLOW_EMBEDDING=false
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
     depends_on:
       - prometheus
     restart: unless-stopped

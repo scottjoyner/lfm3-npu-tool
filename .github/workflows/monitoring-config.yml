@@ -1,0 +1,34 @@
+name: Monitoring Compose security (read-only)
+
+on:
+  push:
+    paths:
+      - "docker/prometheus-grafana.yml"
+      - "scripts/start_monitoring.py"
+      - "scripts/ci_validate_monitoring.py"
+      - ".github/workflows/monitoring-config.yml"
+  pull_request:
+    paths:
+      - "docker/prometheus-grafana.yml"
+      - "scripts/start_monitoring.py"
+      - "scripts/ci_validate_monitoring.py"
+      - ".github/workflows/monitoring-config.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  monitoring-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install YAML validator
+        run: python3 -m pip install pyyaml
+      - name: Validate monitoring configuration without deploying
+        run: python3 scripts/ci_validate_monitoring.py
