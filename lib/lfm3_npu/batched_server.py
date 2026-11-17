@@ -21,6 +21,7 @@ import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi import Depends
 from pydantic import BaseModel
 from tokenizers import Tokenizer
 
@@ -65,6 +66,9 @@ WARMUP_TOKENS = int(os.environ.get("LFM3_WARMUP_TOKENS", "5"))
 
 # Server port (for fleet status reporting)
 SERVER_PORT = int(os.environ.get("LFM3_PORT", "1238"))
+
+# API key for authentication (optional - if set, all endpoints require X-API-Key header)
+API_KEY = os.environ.get("LFM3_API_KEY", "")
 
 # Structured JSON logging (set LFM3_LOG_FORMAT=json)
 LOG_FORMAT_JSON = os.environ.get("LFM3_LOG_FORMAT", "").lower() == "json"
@@ -524,6 +528,22 @@ async def _batch_loop():
 
 
 # ====================================================================== #
+# API Key authentication (optional - if LFM3_API_KEY is set, all endpoints
+# require an X-API-Key header)
+# ====================================================================== #
+API_KEY = os.environ.get("LFM3_API_KEY", "")
+
+
+async def verify_api_key(request: Request):
+    """Validate API key if LFM3_API_KEY is configured."""
+    if not API_KEY:
+        return  # No API key configured - allow all requests
+    provided_key = request.headers.get("X-API-Key")
+    if provided_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# ====================================================================== #
 # Endpoints
 # ====================================================================== #
 @app.get("/health")
@@ -734,7 +754,9 @@ async def fleet_status():
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request, req: ChatCompletionRequest):
+async def chat_completions(
+    request: Request, req: ChatCompletionRequest, _=Depends(verify_api_key)
+):
     if batcher is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -841,7 +863,9 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
 
 
 @app.post("/v1/batch/chat/completions")
-async def batch_chat_completions(reqs: List[ChatCompletionRequest]):
+async def batch_chat_completions(
+    reqs: List[ChatCompletionRequest], _=Depends(verify_api_key)
+):
     """Batch multiple chat completion requests in a single HTTP call.
 
     All prompts are prefilled together and decoded together, maximizing
