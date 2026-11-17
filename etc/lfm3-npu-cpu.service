@@ -15,7 +15,7 @@ Environment=LD_LIBRARY_PATH=/media/scott/data/ryzen-ai-venv/lib/python3.12/site-
 Environment=XLNX_CACHE_DIR=/media/scott/data/vitisai_cache
 Environment=PATH=/opt/xilinx/xrt/bin:/usr/bin:/bin
 Environment=LFM3_TRACING_ENABLED=true
-Environment=LFM3_OTLP_ENDPOINT=http://localhost:14318
+Environment=LFM3_OTLP_ENDPOINT=http://localhost:14318/api/otlp
 
 [Install]
 WantedBy=default.target
