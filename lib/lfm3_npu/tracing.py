@@ -16,7 +16,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.semconv.trace import SpanAttributes
 
 # Global tracer
 _tracer: Optional[trace.Tracer] = None
@@ -77,7 +76,7 @@ def trace_prefill(tracer: trace.Tracer, provider: str, model: str,
     with tracer.start_as_current_span(
         "llm.prefill",
         attributes={
-            SpanAttributes.LLM_REQUEST_TYPE: "prefill",
+            "llm.request_type": "prefill",
             "llm.provider": provider,
             "llm.model": model,
             "llm.prompt_tokens": prompt_tokens,
@@ -102,7 +101,7 @@ def trace_decode(tracer: trace.Tracer, provider: str, model: str,
     with tracer.start_as_current_span(
         "llm.decode",
         attributes={
-            SpanAttributes.LLM_REQUEST_TYPE: "decode",
+            "llm.request_type": "decode",
             "llm.provider": provider,
             "llm.model": model,
             "llm.decode_step": step,
@@ -128,7 +127,7 @@ def trace_request(tracer: trace.Tracer, provider: str, model: str,
     with tracer.start_as_current_span(
         "llm.request",
         attributes={
-            SpanAttributes.LLM_REQUEST_TYPE: "request",
+            "llm.request_type": "request",
             "llm.provider": provider,
             "llm.model": model,
             "llm.endpoint": endpoint,

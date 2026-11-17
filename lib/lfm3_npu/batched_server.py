@@ -354,6 +354,7 @@ async def _batch_loop():
             # --- Collect new requests ---
             # Drain all available requests from the queue for batching
             new_items = []
+            item = None
             try:
                 item = await asyncio.wait_for(_request_queue.get(), timeout=0.01)
                 new_items.append(item)
