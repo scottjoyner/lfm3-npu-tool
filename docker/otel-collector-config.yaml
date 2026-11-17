@@ -10,25 +10,20 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  batch:
-    timeout: 5s
-    max_batch_size: 1024
+  batch: {}
   memory_limiter:
     check_interval: 1s
     limit_mib: 512
-    spike_limit_mib: 128
 
 exporters:
-  jaeger:
+  otlp:
     endpoint: jaeger:14250
     tls:
       insecure: true
-  logging:
-    loglevel: debug
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [jaeger, logging]
+      exporters: [otlp]

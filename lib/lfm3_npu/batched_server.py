@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfm3_npu.config import load_config
 from lfm3_npu.metrics import MetricsCollector
+from lfm3_npu.tracing import init_tracer, trace_prefill, trace_decode, trace_request, get_tracer
 from lfm3_npu.batch_inference import (
     ContinuousBatcher,
     ReqState,
@@ -285,6 +286,15 @@ def load_model():
     metrics = MetricsCollector(provider=PROVIDER, model=f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}")
     _request_queue = asyncio.Queue()
     _shutdown_event = asyncio.Event()
+
+    # Initialize OpenTelemetry tracer
+    otlp_endpoint = os.environ.get("LFM3_OTLP_ENDPOINT")
+    tracing_enabled = os.environ.get("LFM3_TRACING_ENABLED", "false").lower() == "true"
+    if tracing_enabled and otlp_endpoint:
+        init_tracer(service_name="lfm3-cpu", otlp_endpoint=otlp_endpoint, enabled=True)
+        print(f"{SERVER_NAME} Server: OpenTelemetry tracing enabled (endpoint: {otlp_endpoint})", flush=True)
+    else:
+        init_tracer(service_name="lfm3-cpu", enabled=False)
 
     print(f"{SERVER_NAME} Server: Providers: {batcher.sess.get_providers()}", flush=True)
     print(f"{SERVER_NAME} Server: Model loaded on {PROVIDER}", flush=True)
@@ -727,81 +737,92 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
     if batcher is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    endpoint = "chat/completions"
-    start_time = time.perf_counter()
+    tracer = get_tracer()
 
-    # Request ID tracing - use client-provided X-Request-ID or generate one
-    client_request_id = request.headers.get(_REQUEST_ID_HEADER)
-    req_id = client_request_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    with trace_request(
+        tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "chat/completions", 0, req.max_tokens or 50
+    ) as request_span:
+        endpoint = "chat/completions"
+        start_time = time.perf_counter()
 
-    prompt = _build_prompt(req.messages)
-    max_tokens = req.max_tokens or 50
-    temperature = req.temperature or 0.7
-    top_p = req.top_p or 1.0
+        # Request ID tracing - use client-provided X-Request-ID or generate one
+        client_request_id = request.headers.get(_REQUEST_ID_HEADER)
+        req_id = client_request_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
-    result_queue = asyncio.Queue()
+        prompt = _build_prompt(req.messages)
+        max_tokens = req.max_tokens or 50
+        temperature = req.temperature or 0.7
+        top_p = req.top_p or 1.0
 
-    await _request_queue.put((req_id, prompt, temperature, top_p, max_tokens, result_queue))
+        request_span.set_attribute("llm.prompt_tokens", len(tokenizer.encode(prompt).ids))
 
-    if req.stream:
-        return StreamingResponse(
-            _stream_results(req_id, result_queue, max_tokens),
-            media_type="text/event-stream",
+        result_queue = asyncio.Queue()
+
+        await _request_queue.put((req_id, prompt, temperature, top_p, max_tokens, result_queue))
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_results(req_id, result_queue, max_tokens),
+                media_type="text/event-stream",
+            )
+
+        generated_text = ""
+        finish_reason = "stop"
+        error_type = None
+        while True:
+            try:
+                result = await asyncio.wait_for(result_queue.get(), timeout=120.0)
+            except asyncio.TimeoutError:
+                error_type = "timeout"
+                raise HTTPException(status_code=504, detail="Generation timeout")
+
+            generated_text += result.get("token", "")
+            if result.get("finished"):
+                finish_reason = result.get("finish_reason", "stop")
+                break
+
+        duration_ms = (time.perf_counter() - start_time) * 1000
+
+        # Record per-endpoint metrics
+        _record_endpoint_metric(endpoint, duration_ms, 200, error=False)
+
+        # Record in metrics collector
+        if metrics:
+            completion_tokens = len(tokenizer.encode(generated_text).ids)
+            metrics.record_decode(duration_ms / 1000.0, completion_tokens)
+
+        # Record trace for fleet querying
+        ttft_ms = _request_metrics.get(req_id, {}).get("ttft", 0) * 1000
+        await _record_trace(
+            req_id=req_id,
+            prompt=prompt[:200],
+            prompt_tokens=len(tokenizer.encode(prompt).ids),
+            completion_tokens=len(tokenizer.encode(generated_text).ids),
+            total_tokens=len(tokenizer.encode(prompt).ids) + len(tokenizer.encode(generated_text).ids),
+            ttft_ms=ttft_ms,
+            total_latency_ms=duration_ms,
+            finish_reason=finish_reason,
+            provider=PROVIDER,
+            temperature=temperature,
+            top_p=top_p,
+            error=False,
         )
 
-    generated_text = ""
-    finish_reason = "stop"
-    error_type = None
-    while True:
-        try:
-            result = await asyncio.wait_for(result_queue.get(), timeout=120.0)
-        except asyncio.TimeoutError:
-            error_type = "timeout"
-            raise HTTPException(status_code=504, detail="Generation timeout")
+        request_span.set_attribute("llm.completion_tokens", len(tokenizer.encode(generated_text).ids))
+        request_span.set_attribute("llm.duration_seconds", duration_ms / 1000.0)
 
-        generated_text += result.get("token", "")
-        if result.get("finished"):
-            finish_reason = result.get("finish_reason", "stop")
-            break
+        # Log request
+        _log("INFO", "chat_completions",
+             req_id=req_id,
+             duration_ms=round(duration_ms, 2),
+             tokens=len(tokenizer.encode(generated_text).ids),
+             finish_reason=finish_reason,
+             provider=PROVIDER)
 
-    duration_ms = (time.perf_counter() - start_time) * 1000
-
-    # Record per-endpoint metrics
-    _record_endpoint_metric(endpoint, duration_ms, 200, error=False)
-
-    # Record in metrics collector
-    if metrics:
-        completion_tokens = len(tokenizer.encode(generated_text).ids)
-        metrics.record_decode(duration_ms / 1000.0, completion_tokens)
-
-    # Record trace for fleet querying
-    ttft_ms = _request_metrics.get(req_id, {}).get("ttft", 0) * 1000
-    await _record_trace(
-        req_id=req_id,
-        prompt=prompt[:200],
-        prompt_tokens=len(tokenizer.encode(prompt).ids),
-        completion_tokens=len(tokenizer.encode(generated_text).ids),
-        total_tokens=len(tokenizer.encode(prompt).ids) + len(tokenizer.encode(generated_text).ids),
-        ttft_ms=ttft_ms,
-        total_latency_ms=duration_ms,
-        finish_reason=finish_reason,
-        provider=PROVIDER,
-        temperature=temperature,
-        top_p=top_p,
-        error=False,
-    )
-
-    # Log request
-    _log("INFO", "chat_completions",
-         req_id=req_id,
-         duration_ms=round(duration_ms, 2),
-         tokens=len(tokenizer.encode(generated_text).ids),
-         finish_reason=finish_reason,
-         provider=PROVIDER)
-
-    return {
-        "id": req_id,
-        "object": "chat.completion",
+        return {
+            "id": req_id,
+            "object": "chat.completion",
         "created": int(time.time()),
         "model": req.model or f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
         "choices": [{
