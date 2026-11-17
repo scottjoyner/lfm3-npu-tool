@@ -17,12 +17,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pyyaml psutil streamlit
+          python3 -m pip install pytest pyyaml psutil streamlit onnxruntime onnx tokenizers
 
       - name: Run unit tests
         run: |
@@ -43,7 +43,9 @@ jobs:
       - name: Install linting tools
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install flake8 pyflakes shellcheck
+          python3 -m pip install flake8 pyflakes
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
 
       - name: Lint Python files
         run: |
@@ -100,9 +102,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate Dockerfile syntax
+      - name: Build and verify container image
         run: |
-          docker buildx build --load --target=base -t lfm3-npu-tool:ci . || echo "Full build requires FLM binary - Dockerfile syntax checked"
+          docker buildx build --load -t lfm3-npu-tool:ci .
+          docker image inspect lfm3-npu-tool:ci --format '{{.Id}}'
 
   integration:
     runs-on: [self-hosted, npu]
