@@ -28,7 +28,6 @@ import argparse
 import os
 import subprocess
 import sys
-import time
 
 
 RUNNER_DIR = "/media/scott/data/actions-runner"
@@ -101,7 +100,7 @@ def install_runner(token: str, runner_name: str, labels: str):
             cwd=runner_dir,
         )
     else:
-        print(f"Runner archive already exists, skipping download.")
+        print("Runner archive already exists, skipping download.")
 
     # Extract
     print("Extracting runner...")

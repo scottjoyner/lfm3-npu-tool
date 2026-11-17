@@ -378,7 +378,6 @@ def bench_model(
 
     avg_decode = statistics.mean(decode_times)
     avg_tps = statistics.mean(tokens_per_sec)
-    all_token_times_sorted = sorted(all_token_times)
     avg_token_latency = statistics.mean(all_token_times) * 1000
     p95_token_latency = _percentile(all_token_times, 95) * 1000
     p99_token_latency = _percentile(all_token_times, 99) * 1000

@@ -99,7 +99,7 @@ def main():
     check(data and "data" in data and len(data["data"]) > 0, f"NPU server reachable (err: {err})")
     if data and "data" in data:
         lfm = [m for m in data["data"] if "lfm3" in str(m.get("id", ""))]
-        check(len(lfm) > 0, f"NPU lfm3:1.7b model available")
+        check(len(lfm) > 0, "NPU lfm3:1.7b model available")
 
     # 4. Metrics exporter
     print("\n--- Metrics Exporter ---")
@@ -130,9 +130,9 @@ def main():
         if not content and reasoning:
             content = reasoning
         check("4" in full_text, f"NPU answers 2+2 correctly (got: '{full_text[:100]}')")
-        check(len(content) > 0, f"NPU produces non-empty output")
+        check(len(content) > 0, "NPU produces non-empty output")
         check(content.lower().count("assistant:") <= 2,
-              f"NPU output not in conversation loop")
+              "NPU output not in conversation loop")
     else:
         check(False, f"NPU generation: {err}")
 

@@ -54,7 +54,6 @@ import importlib.machinery
 import importlib.util
 import json
 import os
-import psutil
 import sys
 import time
 import urllib.request
@@ -66,15 +65,10 @@ SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SERVER_DIR, "lib"))
 
 from lfm3_npu import (
-    Config,
     LFM3NPUInference,
     ServerManager,
-    bench_model,
-    bench_concurrency,
     compare,
-    convert_model,
     load_config,
-    watchdog_main,
 )
 
 # Server configuration
@@ -177,7 +171,6 @@ def bench_via_http(server, prompt, max_tokens=50, iterations=3):
 # Fleet monitor functions (defined inline to avoid circular imports)
 def cmd_fleet_monitor(args) -> int:
     """Run fleet monitor across CPU and NPU servers."""
-    import sys as _sys
 
     servers = {"CPU": CPU_PORT, "NPU": NPU_PORT}
     if args.config:
@@ -232,7 +225,6 @@ def cmd_fleet_monitor(args) -> int:
 def cmd_smoke_test(args) -> int:
     """Run smoke test / validation of all servers."""
     import subprocess
-    import json
 
     script = os.path.join(SERVER_DIR, "scripts", "smoke_test.py")
     if not os.path.exists(script):
@@ -342,7 +334,7 @@ def cmd_version_check(args) -> int:
                     print(f"  URL: {download_url}")
 
                     # Stop NPU server before upgrade
-                    print(f"  Stopping NPU server...")
+                    print("  Stopping NPU server...")
                     subprocess.run(
                         ["systemctl", "--user", "stop", "lfm3-npu-npu.service"],
                         capture_output=True, text=True, timeout=30
@@ -355,7 +347,7 @@ def cmd_version_check(args) -> int:
                         print(f"  Downloaded to {download_path}")
                     except Exception as e:
                         print(f"  Download failed: {e}")
-                        print(f"  Restarting NPU server...")
+                        print("  Restarting NPU server...")
                         subprocess.run(
                             ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
                             capture_output=True, text=True, timeout=30
@@ -371,7 +363,7 @@ def cmd_version_check(args) -> int:
                         print(f"  Extracted to {extract_dir}")
                     except Exception as e:
                         print(f"  Extraction failed: {e}")
-                        print(f"  Restarting NPU server...")
+                        print("  Restarting NPU server...")
                         subprocess.run(
                             ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
                             capture_output=True, text=True, timeout=30
@@ -411,13 +403,13 @@ def cmd_version_check(args) -> int:
                                     break
 
                         # Restart NPU server
-                        print(f"  Starting NPU server...")
+                        print("  Starting NPU server...")
                         result = subprocess.run(
                             ["systemctl", "--user", "start", "lfm3-npu-npu.service"],
                             capture_output=True, text=True, timeout=30
                         )
                         if result.returncode == 0:
-                            print(f"  NPU server started successfully.")
+                            print("  NPU server started successfully.")
                             # Verify
                             time.sleep(5)
                             try:
@@ -429,12 +421,12 @@ def cmd_version_check(args) -> int:
                                 if lfm:
                                     print(f"  Upgrade verified: {lfm[0]['id']} responding")
                                 else:
-                                    print(f"  WARNING: NPU server running but no lfm3 model found")
+                                    print("  WARNING: NPU server running but no lfm3 model found")
                             except Exception as e:
                                 print(f"  WARNING: Could not verify upgrade: {e}")
                         else:
                             print(f"  Failed to start NPU server: {result.stderr}")
-                            print(f"  Rollback: restoring old binary...")
+                            print("  Rollback: restoring old binary...")
                             shutil.copy2(old_backup, "/tmp/flm")
                             os.chmod("/tmp/flm", 0o755)
                             subprocess.run(
@@ -781,7 +773,6 @@ def cmd_config(args) -> int:
 
 def cmd_status(args) -> int:
     """Show overall system status with health data."""
-    import json
     import subprocess
 
     config = load_config()
@@ -822,8 +813,8 @@ def cmd_status(args) -> int:
     print(f"  Python: {config.get('npu.python_executable', '/usr/bin/python3')}")
     ld_path = config.get("npu.ld_library_path", [])
     print(f"  LD_LIBRARY_PATH parts: {len(ld_path)}")
-    print(f"  FLM binary: /tmp/flm")
-    print(f"  FLM NPU engine: /tmp/lib/liblfm3_npu.so")
+    print("  FLM binary: /tmp/flm")
+    print("  FLM NPU engine: /tmp/lib/liblfm3_npu.so")
 
     return 0
 
@@ -837,7 +828,7 @@ def cmd_compare(args) -> int:
 
     prompts = args.prompts or ["The quick brown fox", "Hello world", "Once upon a time"]
 
-    print(f"Comparing CPU vs NPU inference")
+    print("Comparing CPU vs NPU inference")
     print(f"  CPU model:  {cpu_model}")
     print(f"  NPU model:  {npu_model}")
     print(f"  Prompts:    {len(prompts)}")
@@ -1085,7 +1076,7 @@ def cmd_doctor(args) -> int:
             check("Config is valid YAML", False, str(e))
 
     # 7. Server health
-    manager = ServerManager(load_config())
+    ServerManager(load_config())  # Preserve runtime-directory setup side effect.
     for sname, host, port, path in [
         ("cpu", CPU_HOST, CPU_PORT, "/health"),
         ("npu", NPU_HOST, NPU_PORT, "/v1/models"),

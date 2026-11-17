@@ -12,11 +12,12 @@ import time
 import uuid
 import json
 import asyncio
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Tuple
 from contextlib import asynccontextmanager
 
 import numpy as np
 import onnxruntime_genai as og  # Register RyzenAI NPU provider before onnxruntime
+_ONNXRUNTIME_GENAI_PROVIDER = og  # Preserve import-order side effect.
 import onnxruntime as ort
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, PlainTextResponse
@@ -228,7 +229,7 @@ def load_model():
             MODEL_PATH,
             providers=["CPUExecutionProvider"],
         )
-        print(f"NPU Server: Fallback to CPUExecutionProvider", flush=True)
+        print("NPU Server: Fallback to CPUExecutionProvider", flush=True)
 
     # Load layer types from config.json
     CONV_LAYERS, ATTN_LAYERS, HIDDEN, CONV_L_CACHE = _load_layer_types(MODEL_PATH)
@@ -629,7 +630,7 @@ async def _stream_generate_async(prompt, max_tokens, temperature, top_p):
         if item == "__END__":
             break
         if item == "__DONE__":
-            yield f"data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
             break
         yield f"data: {item}\n\n"
 
