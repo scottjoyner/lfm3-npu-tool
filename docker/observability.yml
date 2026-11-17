@@ -19,6 +19,8 @@ services:
       - "14268:14268"   # Jaeger agent (thrift)
       - "14269:14269"   # Jaeger agent (HTTP)
       - "9411:9411"     # Zipkin compatible
+      - "14318:4318"    # OTLP HTTP
+      - "14318:4318"    # OTLP HTTP
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.111.0
