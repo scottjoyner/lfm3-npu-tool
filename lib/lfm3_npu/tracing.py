@@ -9,7 +9,7 @@ OpenTelemetry Collector).
 import os
 import time
 from contextlib import contextmanager
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider

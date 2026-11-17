@@ -18,8 +18,6 @@ Then configure Prometheus to scrape: http://localhost:9190/metrics
 import argparse
 import json
 import os
-import signal
-import subprocess
 import sys
 import threading
 import time
@@ -154,7 +152,6 @@ class MetricsCollector:
 
     def _read_quality_monitor_state(self):
         """Read quality monitor state from state file."""
-        import os
         state_file = "/media/scott/data/lfm3-npu-tool/var/log/quality-monitor-state.json"
         try:
             if os.path.exists(state_file):

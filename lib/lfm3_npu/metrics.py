@@ -5,9 +5,7 @@ Exposes inference latency, token throughput, and error counters
 via a /metrics HTTP endpoint.
 """
 
-import time
 from threading import Lock
-from typing import Dict, Optional
 
 try:
     from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST

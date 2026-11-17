@@ -20,7 +20,6 @@ Checks:
 
 import argparse
 import json
-import re
 import sys
 import urllib.request
 import urllib.error
@@ -114,7 +113,7 @@ def check_metrics_exporter():
             checks_passed += 1
             return True
         else:
-            print(f"  [FAIL] Metrics exporter: lfm3_npu_up not found")
+            print("  [FAIL] Metrics exporter: lfm3_npu_up not found")
             return False
     except Exception as e:
         print(f"  [FAIL] Metrics exporter: {e}")

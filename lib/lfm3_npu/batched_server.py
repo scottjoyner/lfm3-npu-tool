@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, PlainTextResponse
@@ -28,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfm3_npu.config import load_config
 from lfm3_npu.metrics import MetricsCollector
-from lfm3_npu.tracing import init_tracer, trace_prefill, trace_decode, trace_request, get_tracer
+from lfm3_npu.tracing import init_tracer, trace_request, get_tracer
 from lfm3_npu.batch_inference import (
     ContinuousBatcher,
     ReqState,
@@ -770,12 +769,10 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
 
         generated_text = ""
         finish_reason = "stop"
-        error_type = None
         while True:
             try:
                 result = await asyncio.wait_for(result_queue.get(), timeout=120.0)
             except asyncio.TimeoutError:
-                error_type = "timeout"
                 raise HTTPException(status_code=504, detail="Generation timeout")
 
             generated_text += result.get("token", "")
@@ -967,7 +964,7 @@ async def _stream_results(req_id: str, result_queue: asyncio.Queue, max_tokens: 
                     }],
                 }
                 yield f"data: {json.dumps(final_chunk)}\n\n"
-                yield f"data: [DONE]\n\n"
+                yield "data: [DONE]\n\n"
                 break
     except Exception as e:
         error_chunk = {"error": {"message": str(e), "type": "runtime_error"}}

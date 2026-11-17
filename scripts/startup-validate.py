@@ -114,7 +114,7 @@ def main():
     check(data and "data" in data and len(data["data"]) > 0, f"NPU server reachable (err: {err})")
     if data and "data" in data:
         lfm = [m for m in data["data"] if "lfm3" in str(m.get("id", ""))]
-        check(len(lfm) > 0, f"NPU lfm3:1.7b model available")
+        check(len(lfm) > 0, "NPU lfm3:1.7b model available")
 
     # 4. Metrics exporter
     print("\n--- Metrics Exporter ---")

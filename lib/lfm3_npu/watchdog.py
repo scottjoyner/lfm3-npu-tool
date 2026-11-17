@@ -10,7 +10,6 @@ webhook notifications, cooldown periods, and graceful degradation.
 import json
 import re
 import sys
-import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +17,7 @@ import psutil
 import urllib.request
 
 from .config import Config
-from .server import ServerManager, get_process
+from .server import ServerManager
 
 
 class Watchdog:
@@ -140,7 +139,6 @@ class Watchdog:
             return None
 
         try:
-            import json
             req = urllib.request.urlopen(
                 f"http://{host}:{port}/metrics", timeout=5
             )
@@ -164,11 +162,6 @@ class Watchdog:
         except Exception:
             return None
 
-    def check_and_restart(self, server: str) -> bool:
-        """Check server health and restart if unresponsive or underperforming.
-
-        Returns True if action was taken (restarted), False otherwise.
-        """
     def check_and_restart(self, server: str) -> bool:
         """Check server health and restart if unresponsive or underperforming.
 
@@ -454,7 +447,7 @@ class Watchdog:
         if self.webhook_url:
             print(f"Watchdog: Webhook alerts: {self.webhook_url}", flush=True)
         if self.enable_degradation:
-            print(f"Watchdog: Graceful degradation enabled", flush=True)
+            print("Watchdog: Graceful degradation enabled", flush=True)
         if self.cooldown_seconds > 0:
             print(f"Watchdog: Cooldown: {self.cooldown_seconds}s", flush=True)
         if self.max_uptime_hours:
@@ -485,7 +478,6 @@ class Watchdog:
         Returns:
             Dictionary mapping server name to status info.
         """
-        import json
         servers = servers or ["cpu", "npu"]
         status: Dict[str, Dict] = {}
         for server in servers:

@@ -10,7 +10,6 @@ Runs the same prompt on both CPU and NPU models and compares:
 
 import json
 import os
-import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -125,7 +124,6 @@ def _generate_with_timing(
     prompt_len: int = len(input_ids_list)
 
     input_names = {inp.name for inp in sess.get_inputs()}
-    output_names = {o.name for o in sess.get_outputs()}
     needs_past_conv = any("past_conv." in name for name in input_names)
     needs_past_kv = any("past_key_values" in name for name in input_names)
 
@@ -363,7 +361,7 @@ def compare_cli(
     config: Optional[Config] = None,
 ) -> int:
     """CLI entry point for comparison."""
-    results = compare(
+    compare(
         cpu_model, npu_model, tokenizer, prompts,
         max_tokens, temperature, top_p, config,
     )

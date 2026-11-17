@@ -12,7 +12,7 @@ import streamlit as st
 import requests
 import json
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 # Page config
 st.set_page_config(

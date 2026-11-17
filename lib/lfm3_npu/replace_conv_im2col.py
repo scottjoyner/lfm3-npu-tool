@@ -16,7 +16,7 @@ supported by VitisAI EP.
 """
 
 import onnx
-from onnx import helper, TensorProto, numpy_helper
+from onnx import helper, numpy_helper
 import numpy as np
 
 KERNEL_SIZE = 7
