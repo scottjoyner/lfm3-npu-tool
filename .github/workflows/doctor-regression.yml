@@ -1,0 +1,42 @@
+name: Doctor regression (hosted, read-only)
+
+on:
+  push:
+    paths:
+      - "bin/lfm3-npu"
+      - "tests/test_doctor_diagnostics.py"
+      - ".github/workflows/doctor-regression.yml"
+  pull_request:
+    paths:
+      - "bin/lfm3-npu"
+      - "tests/test_doctor_diagnostics.py"
+      - ".github/workflows/doctor-regression.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  doctor-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install doctor test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pyyaml psutil streamlit onnxruntime onnx tokenizers
+
+      - name: Run fail-closed doctor regression tests
+        run: |
+          python3 -m pytest tests/test_doctor_diagnostics.py -q
+
+      - name: Verify Python syntax
+        run: |
+          python3 -m py_compile bin/lfm3-npu tests/test_doctor_diagnostics.py

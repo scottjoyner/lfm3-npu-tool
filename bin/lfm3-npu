@@ -54,6 +54,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -948,6 +949,41 @@ def cmd_compare_servers(args) -> int:
     return 0
 
 
+def _load_doctor_env_fallback(env_file: str) -> None:
+    """Fill absent variables with literal exports; never overwrite the process environment.
+
+    The deployment environment file may contain shell expansions. They are not
+    valid environment values when this file is read as plain text.
+    """
+    if not os.path.isfile(env_file):
+        return
+    with open(env_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("export ") or "=" not in line:
+                continue
+            key, _, value = line[7:].partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key.isidentifier() and key not in os.environ and not any(
+                marker in value for marker in ("$", "`")
+            ):
+                os.environ[key] = value
+
+
+def _doctor_xrt_version() -> str | None:
+    """Return a verified XRT version from xrt-smi's supported --version flag."""
+    import subprocess
+
+    result = subprocess.run(
+        ["xrt-smi", "--version"], capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        return None
+    match = re.search(r"(?m)^\s*Version\s*:\s*(\S+)", result.stdout)
+    return match.group(1) if match else None
+
+
 def cmd_doctor(args) -> int:
     """Diagnose system health: servers, NPU hardware, environment, configs."""
     import subprocess
@@ -955,17 +991,9 @@ def cmd_doctor(args) -> int:
 
     auto_fix = args.fix
 
-    # Source environment from env file if available (for cron/systemd context)
+    # Only fill missing literal values; preserve the systemd process environment.
     env_file = "/media/scott/data/lfm3-npu-tool/etc/lfm3-npu-env.sh"
-    if os.path.exists(env_file):
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("export ") and "=" in line:
-                    key, _, val = line[7:].partition("=")
-                    # Strip quotes
-                    val = val.strip('"').strip("'")
-                    os.environ[key.strip()] = val
+    _load_doctor_env_fallback(env_file)
 
     issues = []
     checks = []
@@ -996,16 +1024,13 @@ def cmd_doctor(args) -> int:
     except Exception as e:
         check("NPU hardware detected", False, f"xrt-smi failed: {e}")
 
-    # 1b. XRT version
+    # 1b. XRT version. The supported command is --version, not "version".
     try:
-        result = subprocess.run(
-            ["xrt-smi", "version"], capture_output=True, text=True, timeout=10
-        )
-        xrt_version = result.stdout.strip() if result.returncode == 0 else "unknown"
-        check("XRT version available", xrt_version != "unknown",
-              f"XRT version: {xrt_version[:80] if xrt_version != 'unknown' else 'not available'}")
+        xrt_version = _doctor_xrt_version()
+        check("XRT version available", bool(xrt_version),
+              f"XRT version: {xrt_version or 'not available'}")
     except Exception:
-        check("XRT version available", False, "xrt-smi version failed")
+        check("XRT version available", False, "xrt-smi --version failed")
 
     # 1c. NPU device node
     npu_dev = "/dev/accel/accel0"
