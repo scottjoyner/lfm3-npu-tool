@@ -1,0 +1,19 @@
+[Unit]
+Description=GitHub Actions Self-Hosted Runner for LFM3-1.7B NPU
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scott
+WorkingDirectory=/media/scott/data/actions-runner
+ExecStart=/media/scott/data/actions-runner/run.sh
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Environment=RUNNER_NAME=lfm3-npu-runner
+Environment=RUNNER_LABELS=npu,amd-strix-halo,linux,self-hosted
+
+[Install]
+WantedBy=default.target
