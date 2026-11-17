@@ -17,7 +17,7 @@ processors:
 
 exporters:
   otlp:
-    endpoint: jaeger:4318/api/otlp
+    endpoint: jaeger:4318
     tls:
       insecure: true
 
