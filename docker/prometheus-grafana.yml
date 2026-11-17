@@ -1,0 +1,49 @@
+# Prometheus + Grafana stack for LFM3-1.7B inference monitoring
+#
+# Usage:
+#   docker-compose -f docker/prometheus-grafana.yml up -d
+#
+# Access:
+#   Grafana: http://localhost:3000 (admin/admin)
+#   Prometheus: http://localhost:9090
+#
+# Scrape config targets:
+#   host.docker.internal:9190 - NPU metrics exporter (CPU + NPU metrics)
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus-rules.yml:/etc/prometheus/rules/prometheus-rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.1.0
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
