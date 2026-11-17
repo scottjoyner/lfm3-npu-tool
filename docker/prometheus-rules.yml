@@ -1,0 +1,156 @@
+groups:
+  - name: lfm3-npu-inference
+    rules:
+      # NPU server is down
+      - alert: LFM3NPUServerDown
+        expr: lfm3_npu_up == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server is down"
+          description: "The NPU inference server on port 1239 has been unreachable for more than 30 seconds."
+
+      # NPU model not available
+      - alert: LFM3NPUModelUnavailable
+        expr: lfm3_npu_lfm3_model_available == 0
+        for: 60s
+        labels:
+          severity: critical
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B model not available on NPU server"
+          description: "The lfm3:1.7b model is not available on the NPU inference server."
+
+      # NPU request errors
+      - alert: LFM3NPURequestErrors
+        expr: rate(lfm3_npu_requests_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server returning errors"
+          description: "The NPU inference server has returned {{ $value }} errors per second over the last 5 minutes."
+
+      # NPU decode speed degraded
+      - alert: LFM3NPUDecodeSlow
+        expr: lfm3_npu_decode_tokens_per_second < 15 and lfm3_npu_up == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU decode speed degraded"
+          description: "NPU decode speed is {{ $value }} tok/s, below the 15 tok/s threshold."
+
+      # NPU process memory high
+      - alert: LFM3NPUMemoryHigh
+        expr: lfm3_npu_process_memory_rss_bytes / 1024 / 1024 > 3500
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server memory high"
+          description: "NPU server RSS memory is {{ $value }} MB, above 3500 MB threshold."
+
+      # NPU server restarts detected
+      - alert: LFM3NPUServerRestarted
+        expr: changes(lfm3_npu_uptime_seconds[1h]) < 0
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server restarted"
+          description: "The NPU inference server uptime has reset, indicating a restart."
+
+      # CPU server down
+      - alert: LFM3CPUServerDown
+        expr: lfm3_cpu_up == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server is down"
+          description: "The CPU inference server on port 1238 has been unreachable for more than 30 seconds."
+
+      # CPU decode speed degraded (high avg_decode_ms means slow)
+      - alert: LFM3CPUDecodeSlow
+        expr: lfm3_cpu_avg_decode_ms > 200 and lfm3_cpu_up == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU decode speed degraded"
+          description: "CPU average decode time is {{ $value }} ms, above 200 ms threshold."
+
+      # CPU server uptime high (quality degradation risk after ~20 min)
+      - alert: LFM3CPUUptimeHigh
+        expr: lfm3_cpu_uptime_seconds > 7200 and lfm3_cpu_up == 1
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server uptime high (quality degradation risk)"
+          description: "CPU server has been running for {{ $value }} seconds. Quality degradation is likely after ~1200s. Consider restarting."
+
+      # CPU free slots exhausted (overloaded)
+      - alert: LFM3CPUOverloaded
+        expr: lfm3_cpu_free_slots == 0 and lfm3_cpu_up == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server overloaded"
+          description: "CPU server has no free request slots available."
+
+      # Disk usage high
+      - alert: LFM3DiskUsageHigh
+        expr: lfm3_disk_used_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B disk usage high"
+          description: "Disk usage is {{ $value }}%, above 85% threshold."
+
+      # Disk usage critical
+      - alert: LFM3DiskUsageCritical
+        expr: lfm3_disk_used_percent > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B disk usage critical"
+          description: "Disk usage is {{ $value }}%, above 95% threshold."
+
+      # NPU unresponsive restarts (quality monitor detected unreachable NPU)
+      - alert: LFM3NPUUnresponsiveRestarts
+        expr: increases(lfm3_qm_npu_unresponsive_restarts[1h]) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-npu
+        annotations:
+          summary: "LFM3-1.7B NPU server unresponsive restarts"
+          description: "Quality monitor restarted the NPU server {{ $value }} time(s) in the last hour due to unresponsiveness."
+
+      # CPU unresponsive restarts (quality monitor detected unreachable CPU)
+      - alert: LFM3CPUUnresponsiveRestarts
+        expr: increases(lfm3_qm_cpu_restarts[1h]) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: lfm3-cpu
+        annotations:
+          summary: "LFM3-1.7B CPU server unresponsive restarts"
+          description: "Quality monitor restarted the CPU server {{ $value }} time(s) in the last hour due to unresponsiveness."
