@@ -26,8 +26,34 @@ for f in yaml_files:
         print(f'  FAIL: {f}: {e}')
         all_ok = False
 
+# Semantic transport checks: parsing YAML alone does not validate OTLP ports.
+try:
+    with open('docker/observability.yml') as fh:
+        compose = yaml.safe_load(fh)
+    with open('docker/otel-collector-config.yaml') as fh:
+        collector = yaml.safe_load(fh)
+
+    jaeger = compose['services']['jaeger']
+    ports = jaeger['ports']
+    if len(ports) != len(set(ports)):
+        raise ValueError('Jaeger publishes duplicate host port mappings')
+    if ports.count('14318:4318') != 1:
+        raise ValueError('Expected one Jaeger OTLP HTTP mapping 14318:4318')
+
+    exporter = collector['exporters']['otlp']
+    if exporter['endpoint'] != 'jaeger:4317':
+        raise ValueError('OTLP gRPC exporter must use jaeger:4317 (no HTTP path)')
+    if exporter.get('tls', {}).get('insecure') is not True:
+        raise ValueError('In-network OTLP gRPC exporter must declare its TLS policy')
+    if 'otlp' not in collector['service']['pipelines']['traces']['exporters']:
+        raise ValueError('Traces pipeline is not connected to OTLP exporter')
+    print('  OK: Jaeger / OTLP exporter transport and unique port mappings')
+except (KeyError, TypeError, ValueError, OSError, yaml.YAMLError) as e:
+    print(f'  FAIL: Jaeger / OTLP transport: {e}')
+    all_ok = False
+
 if all_ok:
-    print('All YAML files valid')
+    print('All YAML files valid and OTLP transport checks passed')
 else:
-    print('Some YAML files are invalid')
+    print('Some YAML or OTLP transport checks failed')
     sys.exit(1)
