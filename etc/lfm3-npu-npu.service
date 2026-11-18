@@ -18,6 +18,9 @@ Environment=XILINX_XRT=/opt/xilinx/xrt
 Environment=FLM_MODEL_PATH=/home/scott/.config/flm/models
 Environment=PATH=/opt/xilinx/xrt/bin:/usr/bin:/bin
 Environment=LFM3_ENV=production
+# Enterprise: TLS/HTTPS. Uncomment to serve over HTTPS with dev certs:
+# Environment=LFM3_TLS_ENABLED=true
+# Environment=LFM3_TLS_DIR=/media/scott/data/lfm3-npu-tool/etc/tls
 # Enterprise: rate limiting (requests per minute, burst). Uncomment & set API keys in production.
 # Environment=LFM3_API_KEYS=sk-live-abc123:prod-web
 # Environment=LFM3_RATE_LIMIT_RPM=60

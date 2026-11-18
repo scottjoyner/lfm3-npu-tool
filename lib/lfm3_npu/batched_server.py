@@ -10,6 +10,7 @@ Self-contained server that imports ContinuousBatcher from batch_inference.py.
 import asyncio
 import json
 import os
+import ssl
 import sys
 import time
 import uuid
@@ -38,6 +39,9 @@ from lfm3_npu.batch_inference import (
     EOS_TOKEN_ID,
 )
 from lfm3_npu.enterprise import RateLimiter, CircuitBreaker, CircuitOpenError, log_event
+from lfm3_npu.tls import (tls_ready, ssl_context, https_url, tls_status,
+                          generate_dev_certificates, TLS_CERT_FILE, TLS_KEY_FILE,
+                          TLS_CA_FILE, TLS_VERIFY_CLIENT)
 
 
 # ====================================================================== #
@@ -587,6 +591,7 @@ async def health():
         "free_slots": batcher_metrics.get("free_slots", 0),
         "avg_decode_ms": batcher_metrics.get("avg_decode_ms", 0),
         "port": SERVER_PORT,
+        "tls": tls_status(),
     }
 
 
@@ -1080,5 +1085,45 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=1238)
+    parser.add_argument("--tls", action="store_true", default=None,
+                        help="Enable TLS/HTTPS (default: LFM3_TLS_ENABLED env)")
+    parser.add_argument("--tls-dir", default=None,
+                        help="TLS certificate directory (default: LFM3_TLS_DIR env)")
+    parser.add_argument("--tls-gen-cert", action="store_true",
+                        help="Generate self-signed dev certificates and exit")
     args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
+
+    # Handle certificate generation
+    if args.tls_gen_cert:
+        ok, msg = generate_dev_certificates(force=True)
+        print(msg)
+        raise SystemExit(0 if ok else 1)
+
+    # Resolve TLS configuration from flags / env
+    tls_enabled = args.tls if args.tls is not None else tls_ready()
+    if args.tls_dir:
+        import os as _os
+        _os.environ["LFM3_TLS_DIR"] = args.tls_dir
+        # Re-point module-level paths
+        from lfm3_npu import tls as _tls_mod
+        _tls_mod.TLS_DIR = Path(args.tls_dir)
+        _tls_mod.CA_CERT = _tls_mod.TLS_DIR / "ca.crt"
+        _tls_mod.CA_KEY = _tls_mod.TLS_DIR / "ca.key"
+        _tls_mod.SERVER_CERT = _tls_mod.TLS_DIR / "server.crt"
+        _tls_mod.SERVER_KEY = _tls_mod.TLS_DIR / "server.key"
+
+    ssl_ctx = ssl_context() if tls_enabled else None
+    scheme = "https" if ssl_ctx else "http"
+    print(f"{SERVER_NAME}: Starting {scheme} server on {args.host}:{args.port}", flush=True)
+    if tls_enabled and not ssl_ctx:
+        print(f"{SERVER_NAME}: WARNING --tls requested but no cert/key found. "
+              f"Run with --tls-gen-cert to generate dev certs.", flush=True)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        ssl_certfile=TLS_CERT_FILE if ssl_ctx else None,
+        ssl_keyfile=TLS_KEY_FILE if ssl_ctx else None,
+        ssl_ca_certs=TLS_CA_FILE if (ssl_ctx and TLS_VERIFY_CLIENT) else None,
+        ssl_cert_reqs=ssl.CERT_REQUIRED if (ssl_ctx and TLS_VERIFY_CLIENT) else ssl.CERT_NONE,
+    )

@@ -16,3 +16,6 @@ var/run/
 .DS_Store
 Thumbs.db
 node_modules/
+
+# Generated TLS certificates (private keys) - generated at deploy time via --tls-gen-cert
+etc/tls/

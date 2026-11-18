@@ -18,6 +18,9 @@ Environment=LFM3_ENV=production
 Environment=LFM3_LOG_FORMAT=json
 Environment=LFM3_TRACING_ENABLED=true
 Environment=LFM3_OTLP_ENDPOINT=http://localhost:14318/api/otlp
+# Enterprise: TLS/HTTPS. Uncomment to serve over HTTPS with dev certs:
+# Environment=LFM3_TLS_ENABLED=true
+# Environment=LFM3_TLS_DIR=/media/scott/data/lfm3-npu-tool/etc/tls
 # Enterprise: rate limiting (requests per minute, burst). Uncomment & set API keys in production.
 # Environment=LFM3_API_KEY=sk-live-abc123            (batched_server.py / cpu_server.py)
 # Environment=LFM3_API_KEYS=sk-live-abc123:prod-web  (npu_server.py / EnterpriseMiddleware)

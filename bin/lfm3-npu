@@ -55,6 +55,7 @@ import importlib.util
 import json
 import os
 import psutil
+import ssl
 import sys
 import time
 import urllib.request
@@ -76,6 +77,7 @@ from lfm3_npu import (
     load_config,
     watchdog_main,
 )
+from lfm3_npu.tls import tls_ready, https_url, TLS_CA_FILE, TLS_VERIFY_CLIENT
 
 # Server configuration
 CPU_PORT = 1238
@@ -83,9 +85,48 @@ NPU_PORT = 1239
 CPU_HOST = "127.0.0.1"
 NPU_HOST = "127.0.0.1"
 
+# CLI TLS configuration (set by --tls / --tls-verify flags or env)
+CLI_TLS_ENABLED = os.environ.get("LFM3_TLS_ENABLED", "false").lower() in ("1", "true", "yes")
+CLI_TLS_VERIFY = os.environ.get("LFM3_TLS_VERIFY", "true").lower() in ("1", "true", "yes")
+CLI_CA_FILE = os.environ.get("LFM3_TLS_CA_FILE", str(TLS_CA_FILE))
 
-def http_post(url, payload, timeout=60):
-    """Send an HTTP POST request and return parsed JSON response."""
+
+def _server_url(host, port, path=""):
+    """Build http/https URL based on CLI TLS config."""
+    return https_url(host, port, path) if CLI_TLS_ENABLED else f"http://{host}:{port}{path}"
+
+
+def _ssl_context():
+    """SSL context for urllib HTTPS requests (None => plain HTTP)."""
+    if not CLI_TLS_ENABLED:
+        return None
+    ctx = ssl.create_default_context()
+    if not CLI_TLS_VERIFY:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        if os.path.exists(CLI_CA_FILE):
+            ctx.load_verify_locations(CLI_CA_FILE)
+        else:
+            # No CA available; fall back to unverified (dev convenience)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _apply_tls_args(args) -> None:
+    """Apply --tls / --tls-verify / --tls-ca CLI args to the global TLS config."""
+    global CLI_TLS_ENABLED, CLI_TLS_VERIFY, CLI_CA_FILE
+    if getattr(args, "tls", None) is not None:
+        CLI_TLS_ENABLED = bool(args.tls)
+    if getattr(args, "tls_verify", None) is not None:
+        CLI_TLS_VERIFY = bool(args.tls_verify)
+    if getattr(args, "tls_ca", None):
+        CLI_CA_FILE = args.tls_ca
+
+
+def http_post(url, payload, timeout=60, verify=None):
+    """Send an HTTP(S) POST request and return parsed JSON response."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -93,20 +134,22 @@ def http_post(url, payload, timeout=60):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    ctx = _ssl_context() if verify is not False else None
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def http_get(url, timeout=10):
-    """Send an HTTP GET request and return parsed JSON response."""
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+def http_get(url, timeout=10, verify=None):
+    """Send an HTTP(S) GET request and return parsed JSON response."""
+    ctx = _ssl_context() if verify is not False else None
+    with urllib.request.urlopen(url, timeout=timeout, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def generate_via_http(server, prompt, max_tokens=50, temperature=0.7, top_p=0.9):
     """Generate text via HTTP API on the specified server."""
     if server == "cpu":
-        url = f"http://{CPU_HOST}:{CPU_PORT}/v1/chat/completions"
+        url = _server_url(CPU_HOST, CPU_PORT, "/v1/chat/completions")
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
@@ -114,7 +157,7 @@ def generate_via_http(server, prompt, max_tokens=50, temperature=0.7, top_p=0.9)
             "top_p": top_p,
         }
     elif server == "npu":
-        url = f"http://{NPU_HOST}:{NPU_PORT}/v1/chat/completions"
+        url = _server_url(NPU_HOST, NPU_PORT, "/v1/chat/completions")
         payload = {
             "model": "lfm3:1.7b",
             "messages": [{"role": "user", "content": prompt}],
@@ -574,6 +617,7 @@ def cmd_recover(args) -> int:
 
 def cmd_generate(args) -> int:
     """Generate text via HTTP API (cpu or npu server)."""
+    _apply_tls_args(args)
     if args.server == "npu":
         try:
             result = generate_via_http(
@@ -639,6 +683,7 @@ def cmd_server(args) -> int:
 
 def cmd_bench(args) -> int:
     """Benchmark inference performance via HTTP API."""
+    _apply_tls_args(args)
     servers = ["cpu", "npu"] if args.server == "both" else [args.server]
 
     for server in servers:
@@ -651,7 +696,7 @@ def cmd_bench(args) -> int:
             port = CPU_PORT if server == "cpu" else NPU_PORT
             host = CPU_HOST if server == "cpu" else NPU_HOST
             health_path = "/health" if server == "cpu" else "/v1/models"
-            http_get(f"http://{host}:{port}{health_path}", timeout=5)
+            http_get(_server_url(host, port, health_path), timeout=5)
         except Exception as e:
             print(f"Server {server} is not reachable: {e}")
             print(f"  Start it with: lfm3-npu server start {server}")
@@ -734,6 +779,7 @@ def cmd_health(args) -> int:
     """Check server health."""
     import json
 
+    _apply_tls_args(args)
     config = load_config()
     server = args.server
 
@@ -750,7 +796,7 @@ def cmd_health(args) -> int:
         return 1
 
     try:
-        data = http_get(f"http://{host}:{port}{health_path}", timeout=5)
+        data = http_get(_server_url(host, port, health_path), timeout=5)
         print(f"{server.upper()} server at {host}:{port}: HEALTHY")
         print(json.dumps(data, indent=2))
         return 0
@@ -872,6 +918,7 @@ def cmd_compare(args) -> int:
 
 def cmd_compare_servers(args) -> int:
     """Compare CPU vs NPU via live HTTP API servers."""
+    _apply_tls_args(args)
     prompts = args.prompts or ["What is 2+2?", "The capital of France is", "Write a haiku about coding"]
 
     print("=" * 70)
@@ -885,7 +932,7 @@ def cmd_compare_servers(args) -> int:
         ("npu", NPU_HOST, NPU_PORT, "/v1/models"),
     ]:
         try:
-            http_get(f"http://{host}:{port}{path}", timeout=5)
+            http_get(_server_url(host, port, path), timeout=5)
             servers_ok[name] = True
         except Exception as e:
             servers_ok[name] = False
@@ -1091,7 +1138,7 @@ def cmd_doctor(args) -> int:
         ("npu", NPU_HOST, NPU_PORT, "/v1/models"),
     ]:
         try:
-            http_get(f"http://{host}:{port}{path}", timeout=5)
+            http_get(_server_url(host, port, path), timeout=5)
             check(f"{sname.upper()} server reachable", True)
         except Exception as e:
             check(f"{sname.upper()} server reachable", False, f"Not reachable on {host}:{port} ({e})")
@@ -1171,7 +1218,7 @@ def cmd_doctor(args) -> int:
                 ("npu", NPU_HOST, NPU_PORT, "/v1/models"),
             ]:
                 try:
-                    http_get(f"http://{host}:{port}{path}", timeout=5)
+                    http_get(_server_url(host, port, path), timeout=5)
                 except Exception as e:
                     remaining_issues.append(f"{sname.upper()} server still unreachable: {e}")
 
@@ -1256,6 +1303,11 @@ def main() -> int:
     gen_parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling threshold")
     gen_parser.add_argument("--model", help="Model path (CPU only, overrides config)")
     gen_parser.add_argument("--tokenizer", help="Tokenizer path (overrides config)")
+    gen_parser.add_argument("--tls", action="store_true", default=None,
+                            help="Use HTTPS (default: LFM3_TLS_ENABLED env)")
+    gen_parser.add_argument("--tls-verify", action="store_true", default=None,
+                            help="Verify server certificate (default: LFM3_TLS_VERIFY env)")
+    gen_parser.add_argument("--tls-ca", help="CA cert file (default: LFM3_TLS_CA_FILE env)")
     gen_parser.set_defaults(func=cmd_generate)
 
     # server
@@ -1273,6 +1325,11 @@ def main() -> int:
     bench_parser.add_argument("--iterations", type=int, default=3, help="Number of iterations")
     bench_parser.add_argument("--model", help="Model path (overrides config)")
     bench_parser.add_argument("--tokenizer", help="Tokenizer path (overrides config)")
+    bench_parser.add_argument("--tls", action="store_true", default=None,
+                              help="Use HTTPS (default: LFM3_TLS_ENABLED env)")
+    bench_parser.add_argument("--tls-verify", action="store_true", default=None,
+                              help="Verify server certificate (default: LFM3_TLS_VERIFY env)")
+    bench_parser.add_argument("--tls-ca", help="CA cert file (default: LFM3_TLS_CA_FILE env)")
     bench_parser.set_defaults(func=cmd_bench)
 
     # perf
@@ -1287,6 +1344,11 @@ def main() -> int:
     # health
     health_parser = subparsers.add_parser("health", help="Check server health")
     health_parser.add_argument("server", choices=["cpu", "npu"], help="Server to check")
+    health_parser.add_argument("--tls", action="store_true", default=None,
+                               help="Use HTTPS (default: LFM3_TLS_ENABLED env)")
+    health_parser.add_argument("--tls-verify", action="store_true", default=None,
+                               help="Verify server certificate (default: LFM3_TLS_VERIFY env)")
+    health_parser.add_argument("--tls-ca", help="CA cert file (default: LFM3_TLS_CA_FILE env)")
     health_parser.set_defaults(func=cmd_health)
 
     # convert
@@ -1324,6 +1386,11 @@ def main() -> int:
     compare_srv_parser.add_argument("--max-tokens", type=int, default=50, help="Max tokens per generation")
     compare_srv_parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
     compare_srv_parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling threshold")
+    compare_srv_parser.add_argument("--tls", action="store_true", default=None,
+                                    help="Use HTTPS (default: LFM3_TLS_ENABLED env)")
+    compare_srv_parser.add_argument("--tls-verify", action="store_true", default=None,
+                                    help="Verify server certificate (default: LFM3_TLS_VERIFY env)")
+    compare_srv_parser.add_argument("--tls-ca", help="CA cert file (default: LFM3_TLS_CA_FILE env)")
     compare_srv_parser.set_defaults(func=cmd_compare_servers)
 
     # doctor

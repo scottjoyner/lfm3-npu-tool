@@ -12,6 +12,7 @@ import time
 import uuid
 import json
 import asyncio
+import ssl
 from typing import List, Optional, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 
@@ -37,6 +38,9 @@ from lfm3_npu.enterprise import (
     log_event,
     require_api_key,
 )
+from lfm3_npu.tls import (tls_ready, ssl_context, https_url, tls_status,
+                          generate_dev_certificates, TLS_CERT_FILE, TLS_KEY_FILE,
+                          TLS_CA_FILE, TLS_VERIFY_CLIENT)
 
 
 def _load_layer_types(model_path: str) -> Tuple[List[int], List[int], int, int]:
@@ -371,7 +375,8 @@ def _build_feed(
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "provider": "CPUExecutionProvider", "model": "lfm3-1.7b-cpu"}
+    return {"status": "healthy", "provider": "CPUExecutionProvider", "model": "lfm3-1.7b-cpu",
+            "tls": tls_status()}
 
 
 @app.get("/v1/models")
@@ -828,8 +833,42 @@ async def _stream_generate_async(prompt, max_tokens, temperature, top_p):
 if __name__ == "__main__":
     import uvicorn
     import argparse
+    from pathlib import Path
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=1238)
+    parser.add_argument("--tls", action="store_true", default=None,
+                        help="Enable TLS/HTTPS (default: LFM3_TLS_ENABLED env)")
+    parser.add_argument("--tls-dir", default=None,
+                        help="TLS certificate directory (default: LFM3_TLS_DIR env)")
+    parser.add_argument("--tls-gen-cert", action="store_true",
+                        help="Generate self-signed dev certificates and exit")
     args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
+
+    if args.tls_gen_cert:
+        ok, msg = generate_dev_certificates(force=True)
+        print(msg)
+        raise SystemExit(0 if ok else 1)
+
+    if args.tls_dir:
+        import os as _os
+        _os.environ["LFM3_TLS_DIR"] = args.tls_dir
+        from lfm3_npu import tls as _tls_mod
+        _tls_mod.TLS_DIR = Path(args.tls_dir)
+        _tls_mod.CA_CERT = _tls_mod.TLS_DIR / "ca.crt"
+        _tls_mod.CA_KEY = _tls_mod.TLS_DIR / "ca.key"
+        _tls_mod.SERVER_CERT = _tls_mod.TLS_DIR / "server.crt"
+        _tls_mod.SERVER_KEY = _tls_mod.TLS_DIR / "server.key"
+
+    ssl_ctx = ssl_context() if tls_ready() else None
+    scheme = "https" if ssl_ctx else "http"
+    print(f"CPU Server: Starting {scheme} server on {args.host}:{args.port}", flush=True)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        ssl_certfile=TLS_CERT_FILE if ssl_ctx else None,
+        ssl_keyfile=TLS_KEY_FILE if ssl_ctx else None,
+        ssl_ca_certs=TLS_CA_FILE if (ssl_ctx and TLS_VERIFY_CLIENT) else None,
+        ssl_cert_reqs=ssl.CERT_REQUIRED if (ssl_ctx and TLS_VERIFY_CLIENT) else ssl.CERT_NONE,
+    )

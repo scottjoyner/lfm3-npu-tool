@@ -479,6 +479,123 @@ def test_otel_collector_jaeger_path():
     print("  ✓ OTel collector -> Jaeger path is correct")
 
 
+# ---------------------------------------------------------------------------
+# TLS tests
+# ---------------------------------------------------------------------------
+
+
+def test_tls_module_imports():
+    """Test that the TLS module imports cleanly."""
+    from lfm3_npu.tls import (
+        tls_ready, ssl_context, https_url, tls_status,
+        generate_dev_certificates, TLS_CERT_FILE, TLS_KEY_FILE,
+        TLS_CA_FILE, TLS_VERIFY_CLIENT,
+    )
+    assert callable(tls_ready)
+    assert callable(ssl_context)
+    assert callable(https_url)
+    assert callable(tls_status)
+    assert callable(generate_dev_certificates)
+    print("  ✓ TLS module imports work")
+
+
+def test_tls_status():
+    """Test tls_status returns expected keys."""
+    from lfm3_npu.tls import tls_status
+    status = tls_status()
+    for key in ("tls_enabled", "tls_ready", "cert_file", "key_file",
+                "ca_file", "verify_client", "cert_exists",
+                "key_exists", "ca_exists"):
+        assert key in status, f"tls_status missing key: {key}"
+    assert isinstance(status["tls_enabled"], bool)
+    assert isinstance(status["tls_ready"], bool)
+    print("  ✓ tls_status returns expected keys")
+
+
+def test_https_url():
+    """Test https_url builds correct scheme based on TLS_ENABLED."""
+    import os
+    from lfm3_npu import tls as tls_mod
+    import importlib
+
+    # TLS disabled (default in test process) -> http
+    os.environ.pop("LFM3_TLS_ENABLED", None)
+    importlib.reload(tls_mod)
+    url = tls_mod.https_url("127.0.0.1", 1238, "/health")
+    assert url == "http://127.0.0.1:1238/health", url
+
+    # TLS enabled with port offset -> https
+    os.environ["LFM3_TLS_ENABLED"] = "true"
+    os.environ["LFM3_TLS_PORT_OFFSET"] = "443"
+    importlib.reload(tls_mod)
+    assert tls_mod.TLS_ENABLED is True
+    url = tls_mod.https_url("127.0.0.1", 1238, "/health")
+    assert url == "https://127.0.0.1:1681/health", url
+    print("  ✓ https_url builds correct scheme")
+
+
+def test_generate_dev_certificates():
+    """Test that dev certificate generation produces valid files."""
+    import os
+    from lfm3_npu.tls import (
+        generate_dev_certificates, TLS_DIR, CA_CERT, CA_KEY,
+        SERVER_CERT, SERVER_KEY, OPENSSL_CNF,
+    )
+    ok, msg = generate_dev_certificates(force=True)
+    assert ok is True, f"Cert generation failed: {msg}"
+    assert CA_CERT.exists(), "CA cert should exist"
+    assert CA_KEY.exists(), "CA key should exist"
+    assert SERVER_CERT.exists(), "Server cert should exist"
+    assert SERVER_KEY.exists(), "Server key should exist"
+    assert OPENSSL_CNF.exists(), "OpenSSL config should exist"
+    # Key files should be owner-read-only (600)
+    assert (SERVER_KEY.stat().st_mode & 0o777) == 0o600, "Server key should be 600"
+    assert (CA_KEY.stat().st_mode & 0o777) == 0o600, "CA key should be 600"
+    print(f"  ✓ Dev certificates generated in {TLS_DIR}")
+
+
+def test_ssl_context_returns_context_when_ready():
+    """Test ssl_context returns an SSLContext when certs exist."""
+    import os
+    os.environ["LFM3_TLS_ENABLED"] = "true"
+    from lfm3_npu import tls as tls_mod
+    # Force re-read of env-dependent flags by reloading
+    import importlib
+    importlib.reload(tls_mod)
+    assert tls_mod.tls_ready() is True
+    ctx = tls_mod.ssl_context()
+    assert ctx is not None
+    import ssl
+    assert isinstance(ctx, ssl.SSLContext)
+    print("  ✓ ssl_context returns SSLContext when certs ready")
+
+
+def test_tls_service_files_document_env():
+    """Test that systemd service files document TLS env vars."""
+    import os
+    for svc in ("lfm3-npu-cpu.service", "lfm3-npu-npu.service"):
+        svc_path = os.path.join(SERVER_DIR, "etc", svc)
+        assert os.path.exists(svc_path), f"{svc} should exist"
+        with open(svc_path) as f:
+            content = f.read()
+        assert "LFM3_TLS_ENABLED" in content, f"{svc} should document LFM3_TLS_ENABLED"
+        assert "LFM3_TLS_DIR" in content, f"{svc} should document LFM3_TLS_DIR"
+    print("  ✓ Service files document TLS env vars")
+
+
+def test_cli_has_tls_flags():
+    """Test that CLI has --tls / --tls-verify / --tls-ca flags."""
+    import subprocess
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"), "generate", "--help"],
+        capture_output=True, text=True, timeout=10
+    )
+    output = result.stdout
+    for flag in ["--tls", "--tls-verify", "--tls-ca"]:
+        assert flag in output, f"CLI generate should have {flag} flag"
+    print("  ✓ CLI has --tls / --tls-verify / --tls-ca flags")
+
+
 
 
 def test_startup_validate_service_exists():
@@ -534,6 +651,13 @@ def main():
         test_batched_server_has_live_ready,
         test_npu_server_has_live_ready,
         test_otel_collector_jaeger_path,
+        test_tls_module_imports,
+        test_tls_status,
+        test_https_url,
+        test_generate_dev_certificates,
+        test_ssl_context_returns_context_when_ready,
+        test_tls_service_files_document_env,
+        test_cli_has_tls_flags,
     ]
 
     passed = 0
