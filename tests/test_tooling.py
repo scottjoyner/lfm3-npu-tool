@@ -1371,6 +1371,92 @@ def test_feature_flags_delete():
 
 
 
+
+# ---------------------------------------------------------------------------
+# Backup/restore tests
+# ---------------------------------------------------------------------------
+
+
+def test_backup_restore_imports():
+    """Test that the backup/restore module imports cleanly."""
+    from lfm3_npu.backup_restore import BackupManager, get_backup_manager
+    assert callable(BackupManager)
+    assert callable(get_backup_manager)
+    print("  ✓ Backup/restore module imports work")
+
+
+def test_backup_create_verify_restore():
+    """Test full backup lifecycle: create, verify, restore, delete."""
+    import tempfile, os, json
+    from lfm3_npu.backup_restore import BackupManager
+
+    tmp_dir = tempfile.mkdtemp()
+    config_file = os.path.join(tmp_dir, "config.yaml")
+    state_file = os.path.join(tmp_dir, "state.json")
+
+    with open(config_file, "w") as f:
+        f.write("server:\\n  port: 1238\\n")
+    with open(state_file, "w") as f:
+        json.dump({"restarts": 5}, f)
+
+    backup_dir = os.path.join(tmp_dir, "backups")
+    bm = BackupManager(backup_dir=backup_dir, retention_days=7)
+
+    backup_name = bm.create_backup(
+        name="test-backup-1",
+        sources=[config_file, state_file],
+        description="Test backup",
+    )
+    assert backup_name == "test-backup-1"
+
+    backups = bm.list_backups()
+    assert len(backups) == 1
+    assert backups[0]["file_count"] == 2
+
+    result = bm.verify_backup(backup_name)
+    assert result["valid"] is True
+    assert result["verified_files"] == 2
+
+    info = bm.get_backup_info(backup_name)
+    assert info is not None
+
+    restore_dir = os.path.join(tmp_dir, "restore")
+    bm.restore_backup(backup_name, destination=restore_dir)
+    assert os.path.exists(os.path.join(restore_dir, config_file.lstrip("/")))
+
+    bm.delete_backup(backup_name)
+    assert len(bm.list_backups()) == 0
+    print("  ✓ Backup create/verify/restore/delete works")
+
+
+def test_backup_corrupt_detection():
+    """Test that backup verification detects corruption."""
+    import tempfile, os
+    from lfm3_npu.backup_restore import BackupManager
+
+    tmp_dir = tempfile.mkdtemp()
+    config_file = os.path.join(tmp_dir, "config.yaml")
+    with open(config_file, "w") as f:
+        f.write("test\\n")
+
+    backup_dir = os.path.join(tmp_dir, "backups")
+    bm = BackupManager(backup_dir=backup_dir, retention_days=7)
+    bm.create_backup(name="test-backup-1", sources=[config_file])
+
+    # Corrupt the backup file by overwriting bytes in the middle
+    backup_file = os.path.join(backup_dir, "test-backup-1.tar.gz")
+    file_size = os.path.getsize(backup_file)
+    with open(backup_file, "r+b") as f:
+        f.seek(max(0, file_size // 2))
+        f.write(b"CORRUPT_CORRUPT_CORRUPT")
+
+    result = bm.verify_backup("test-backup-1")
+    assert result["valid"] is False
+    # Either checksum mismatches or archive-level corruption
+    assert "failed_files" in result or "error" in result
+    print("  ✓ Corrupt backup detection works")
+
+
 def main():
     """Run all tests."""
     print("Running LFM3-1.7B NPU tooling tests...\n")
@@ -1451,6 +1537,9 @@ def main():
         test_feature_flags_persistence,
         test_feature_flags_callbacks,
         test_feature_flags_delete,
+        test_backup_restore_imports,
+        test_backup_create_verify_restore,
+        test_backup_corrupt_detection,
         test_startup_validate_service_exists,
     ]
 
