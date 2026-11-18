@@ -15,7 +15,6 @@ Usage:
 import json
 import re
 import sys
-import time
 import urllib.request
 import urllib.error
 
@@ -315,7 +314,7 @@ def main():
             print(f"  Speed ratio: {npu['avg_decode'] / cpu['avg_decode']:.1f}x "
                   f"({'faster' if npu['avg_decode'] > cpu['avg_decode'] else 'slower'})")
         else:
-            print(f"  Speed ratio: N/A (CPU decode TPS not reported)")
+            print("  Speed ratio: N/A (CPU decode TPS not reported)")
         print(f"{'=' * 70}")
 
     return 0

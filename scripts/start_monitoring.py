@@ -17,7 +17,6 @@ The metrics exporter must be running on port 9190:
 
 import os
 import subprocess
-import sys
 
 TOOL_DIR = "/media/scott/data/lfm3-npu-tool"
 COMPOSE_FILE = os.path.join(TOOL_DIR, "docker", "prometheus-grafana.yml")
@@ -69,4 +68,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-EOF

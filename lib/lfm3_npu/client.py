@@ -6,7 +6,7 @@ Provides a simple Python interface to the OpenAI-compatible API.
 
 import json
 import urllib.request
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 
 class LFM3Client:
@@ -71,7 +71,6 @@ class LFM3Client:
 
 
 if __name__ == "__main__":
-    import sys
     client = LFM3Client()
     try:
         print(f"Health: {client.health()}")
