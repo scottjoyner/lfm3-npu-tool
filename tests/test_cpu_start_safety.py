@@ -66,5 +66,48 @@ class CpuLegacyStartSafetyTests(unittest.TestCase):
         self.assertIn("flock -n", source)
 
 
+
+    def run_port_guard(self, *, listen=False, ss_error=False, missing_ss=False):
+        import sys
+        guard = SCRIPT.parent / "scripts" / "cpu_port_guard.py"
+        with tempfile.TemporaryDirectory() as dirname:
+            tmp = Path(dirname)
+            if not missing_ss:
+                tool = tmp / "ss"
+                if ss_error:
+                    tool.write_text("#!/bin/sh\\nexit 3\\n".replace("\\n", "\n"))
+                elif listen:
+                    tool.write_text("#!/bin/sh\\necho 'LISTEN 0 128 0.0.0.0:1238'\\n".replace("\\n", "\n"))
+                else:
+                    tool.write_text("#!/bin/sh\\nexit 0\\n".replace("\\n", "\n"))
+                tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+            env = {**os.environ, "PATH": str(tmp)}
+            return subprocess.run(
+                [sys.executable, str(guard)], env=env,
+                capture_output=True, text=True, timeout=5,
+            )
+
+    def test_free_port_execcondition_allows_start(self):
+        result = self.run_port_guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_occupied_port_execcondition_skips_start(self):
+        result = self.run_port_guard(listen=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("occupied", result.stdout)
+
+    def test_failed_ss_execcondition_skips_start(self):
+        result = self.run_port_guard(ss_error=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+
+    def test_missing_ss_execcondition_skips_start(self):
+        result = self.run_port_guard(missing_ss=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+
+    def test_unit_registers_port_condition_and_prevents_bind_exit_loop(self):
+        unit = (SCRIPT.parent / "etc" / "lfm3-npu-cpu.service").read_text()
+        self.assertIn("ExecCondition=/usr/bin/python3 -B /media/scott/data/lfm3-npu-tool/scripts/cpu_port_guard.py", unit)
+        self.assertIn("RestartPreventExitStatus=3", unit)
+
 if __name__ == "__main__":
     unittest.main()
