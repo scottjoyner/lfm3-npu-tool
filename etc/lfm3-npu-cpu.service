@@ -26,6 +26,15 @@ Environment=LFM3_OTLP_ENDPOINT=http://localhost:14318/api/otlp
 # Environment=LFM3_API_KEYS=sk-live-abc123:prod-web  (npu_server.py / EnterpriseMiddleware)
 # Environment=LFM3_RATE_LIMIT_RPM=60
 # Environment=LFM3_RATE_LIMIT_BURST=10
+# Enterprise: SLO targets
+# Environment=LFM3_SLO_AVAILABILITY=99.9
+# Environment=LFM3_SLO_LATENCY_P95_MS=5000
+# Enterprise: input validation limits
+# Environment=LFM3_MAX_PROMPT_CHARS=4000
+# Environment=LFM3_MAX_PROMPT_TOKENS=1024
+# Environment=LFM3_MAX_MESSAGES=20
+# Environment=LFM3_DENY_LIST=10.0.0.1
+# Environment=LFM3_ALLOW_LIST=
 
 [Install]
 WantedBy=default.target

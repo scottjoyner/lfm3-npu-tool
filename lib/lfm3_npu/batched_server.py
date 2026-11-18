@@ -10,6 +10,7 @@ Self-contained server that imports ContinuousBatcher from batch_inference.py.
 import asyncio
 import json
 import os
+import signal
 import ssl
 import sys
 import time
@@ -42,6 +43,11 @@ from lfm3_npu.enterprise import RateLimiter, CircuitBreaker, CircuitOpenError, l
 from lfm3_npu.tls import (tls_ready, ssl_context, https_url, tls_status,
                           generate_dev_certificates, TLS_CERT_FILE, TLS_KEY_FILE,
                           TLS_CA_FILE, TLS_VERIFY_CLIENT)
+from lfm3_npu.slo import get_tracker, record_request, prometheus_metrics_all
+from lfm3_npu.validation import (
+    validate_client, validate_messages, validate_max_tokens,
+    ValidationError, validation_error_response, is_validation_error,
+)
 
 
 # ====================================================================== #
@@ -84,6 +90,15 @@ _circuit_breaker = CircuitBreaker(
 
 print(f"{SERVER_NAME}: Rate limiting {_rate_limiter.rate:.2f} req/s (burst {_rate_limiter.capacity})", flush=True)
 print(f"{SERVER_NAME}: Circuit breaker threshold={_circuit_breaker.failure_threshold}, recovery={_circuit_breaker.recovery_timeout}s", flush=True)
+
+# Enterprise: SLO tracker
+_slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
+_slo_target_latency_ms = float(os.environ.get("LFM3_SLO_LATENCY_P95_MS", "5000"))
+_slo_tracker = get_tracker(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}")
+
+# Enterprise: graceful shutdown state
+_shutting_down = False
+_shutdown_event_loop = None
 
 # Structured JSON logging (set LFM3_LOG_FORMAT=json)
 LOG_FORMAT_JSON = os.environ.get("LFM3_LOG_FORMAT", "").lower() == "json"
@@ -323,14 +338,50 @@ def load_model():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    loop = asyncio.get_running_loop()
+    _shutdown_event_loop = loop
+
+    # Signal handlers for graceful shutdown (SIGTERM / SIGINT)
+    def _request_shutdown(sig):
+        global _shutting_down
+        if not _shutting_down:
+            print(f"{SERVER_NAME}: Received signal {sig}, initiating graceful shutdown...", flush=True)
+            _shutting_down = True
+            # Schedule shutdown on the event loop
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(_graceful_shutdown()))
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _request_shutdown, "SIGTERM")
+        loop.add_signal_handler(signal.SIGINT, _request_shutdown, "SIGINT")
+    except (NotImplementedError, OSError):
+        # Signal handlers not available (e.g., on Windows or non-main thread)
+        pass
+
     load_model()
     task = asyncio.create_task(_batch_loop())
     try:
         yield
     finally:
-        _shutdown_event.set()
-        if task:
-            task.cancel()
+        await _graceful_shutdown()
+
+
+async def _graceful_shutdown():
+    """Drain in-flight requests, then stop the batch loop."""
+    global _shutting_down
+    _shutting_down = True
+    print(f"{SERVER_NAME}: Graceful shutdown initiated - stopping batch loop...", flush=True)
+    _shutdown_event.set()
+    if _batch_task is not None:
+        _batch_task.cancel()
+        try:
+            await _batch_task
+        except asyncio.CancelledError:
+            pass
+    # Wait for active requests to complete (up to 30s)
+    deadline = time.monotonic() + 30.0
+    while _active and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+    print(f"{SERVER_NAME}: Graceful shutdown complete ({len(_active)} active requests drained)", flush=True)
 
 
 app = FastAPI(title=f"LFM3-1.7B Batched Inference Server ({PROVIDER})", lifespan=lifespan)
@@ -606,6 +657,8 @@ async def readiness():
     """Kubernetes-style readiness probe: the model/batcher is loaded and serving."""
     if batcher is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
+    if _shutting_down:
+        raise HTTPException(status_code=503, detail="Server is shutting down")
     batcher_metrics = batcher.get_metrics() if batcher else {}
     return {
         "status": "ready",
@@ -616,6 +669,32 @@ async def readiness():
         "active_slots": batcher_metrics.get("active_slots", 0),
         "free_slots": batcher_metrics.get("free_slots", 0),
     }
+
+
+@app.get("/slo")
+async def slo_report():
+    """Service-Level Objective report: availability, latency p95, error budget."""
+    return _slo_tracker.snapshot()
+
+
+@app.get("/version")
+async def version():
+    """Version info for the server."""
+    return {
+        "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "provider": PROVIDER,
+        "model": "LFM3-1.7B",
+        "version": "1.0.0",
+        "build": "enterprise",
+    }
+
+
+@app.post("/shutdown")
+async def shutdown():
+    """Initiate graceful shutdown (drain in-flight requests, then stop)."""
+    global _shutting_down
+    _shutting_down = True
+    return {"status": "shutting_down", "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}"}
 
 
 @app.get("/v1/models")
@@ -651,6 +730,8 @@ async def metrics_endpoint():
     text += "\n# Batcher metrics\n"
     for k, v in batcher_metrics.items():
         text += f"{k} {v}\n"
+    text += "\n# SLO metrics\n"
+    text += prometheus_metrics_all()
     return PlainTextResponse(content=text, media_type=metrics.get_content_type())
 
 
@@ -815,11 +896,36 @@ async def chat_completions(
     if batcher is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
+    # Enterprise: graceful shutdown - reject new requests while draining
+    if _shutting_down:
+        raise HTTPException(status_code=503, detail="Server is shutting down, try again later")
+
     tracer = get_tracer()
 
     client_ip = request.client.host if request.client else "unknown"
     request_id = request.headers.get("X-Request-ID") or f"chatcmpl-{uuid.uuid4().hex[:12]}"
     start_time = time.perf_counter()
+
+    # Enterprise: input validation
+    api_key_label = getattr(request.state, "api_key_label", None)
+    try:
+        validate_client(api_key_label or client_ip)
+        validate_messages(req.messages)
+        validate_max_tokens(req.max_tokens)
+    except ValidationError as e:
+        record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+                       False, (time.perf_counter() - start_time) * 1000, "chat/completions")
+        log_event(
+            "validation.rejected",
+            request_id=request_id,
+            client_ip=client_ip,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=400,
+            event="validation_error",
+            extra={"code": e.code},
+        )
+        raise HTTPException(status_code=400, detail=validation_error_response(e))
 
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
@@ -866,6 +972,8 @@ async def chat_completions(
                         finish_reason = result.get("finish_reason", "stop")
                         break
         except CircuitOpenError as e:
+            record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+                           False, (time.perf_counter() - start_time) * 1000, "chat/completions")
             log_event(
                 "inference.circuit_open",
                 request_id=request_id,
@@ -914,6 +1022,10 @@ async def chat_completions(
 
         request_span.set_attribute("llm.completion_tokens", len(tokenizer.encode(generated_text).ids))
         request_span.set_attribute("llm.duration_seconds", duration_ms / 1000.0)
+
+        # Enterprise: SLO tracking - record successful request
+        record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+                       True, duration_ms, "chat/completions")
 
         # Log request
         _log("INFO", "chat_completions",
