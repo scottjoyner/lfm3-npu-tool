@@ -47,8 +47,20 @@ Examples:
     lfm3-npu benchmark-cron          # Run periodic benchmark
     lfm3-npu validate                # Validate all services after boot
     lfm3-npu recover                 # Recover all servers (stop, start, verify)
+    lfm3-npu config-validate         # Validate configuration schema
+    lfm3-npu config-reload           # Trigger config hot-reload
+    lfm3-npu feature-flags           # List all feature flags
+    lfm3-npu feature-flags get <name>    # Get a specific feature flag
+    lfm3-npu feature-flags set <name> <true|false> [--percentage N] # Set a feature flag
+    lfm3-npu feature-flags enable <name>   # Enable a feature flag
+    lfm3-npu feature-flags disable <name>  # Disable a feature flag
+    lfm3-npu backup create           # Create a backup
+    lfm3-npu backup list             # List all backups
+    lfm3-npu backup verify <name>    # Verify backup integrity
+    lfm3-npu backup restore <name>   # Restore a backup
+    lfm3-npu backup delete <name>    # Delete a backup
+    lfm3-npu audit [--limit N]       # Show recent audit log entries
 """
-
 import argparse
 import importlib.machinery
 import importlib.util
@@ -78,6 +90,10 @@ from lfm3_npu import (
     watchdog_main,
 )
 from lfm3_npu.tls import tls_ready, https_url, TLS_CA_FILE, TLS_VERIFY_CLIENT
+from lfm3_npu.config_schema import validate_config, ConfigValidationError, ReloadableConfig
+from lfm3_npu.feature_flags import get_flags
+from lfm3_npu.backup_restore import get_backup_manager
+from lfm3_npu.audit import get_audit
 
 # Server configuration
 CPU_PORT = 1238
@@ -616,6 +632,246 @@ def cmd_recover(args) -> int:
 
 
 def cmd_generate(args) -> int:
+    """Generate text via HTTP API (cpu or npu server)."""
+    _apply_tls_args(args)
+    if args.server == "npu":
+        try:
+            result = generate_via_http(
+                "npu", args.prompt,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+            )
+            print(f"Prompt: '{args.prompt}'", flush=True)
+            if result["reasoning"] and not result["used_reasoning_fallback"]:
+                print(f"Reasoning: {result['reasoning']}", flush=True)
+            print(f"Content: {result['content']}", flush=True)
+            usage = result.get("usage", {})
+            if usage:
+                print(f"Decode: {usage.get('decoding_speed_tps', 'N/A'):.1f} tok/s, "
+                      f"TTFT: {usage.get('prefill_duration_ttft', 'N/A')}s")
+            return 0
+        except Exception as e:
+            print(f"NPU generation failed: {e}", flush=True)
+            print("Is the NPU server running? Try: lfm3-npu server start npu", flush=True)
+            return 1
+    else:
+        # CPU server via LFM3NPUInference (direct Python API)
+        config = load_config()
+        model_path = args.model or config.get("server.cpu.model_path")
+        tokenizer_path = args.tokenizer or config.get("model.tokenizer")
+
+        print(f"Loading CPU model: {model_path}", flush=True)
+        engine = LFM3NPUInference(model_path, tokenizer_path, config)
+        engine.load()
+        engine.warmup()
+
+        print(f"Prompt: '{args.prompt}'", flush=True)
+        print("Generated: ", end="", flush=True)
+
+        result = engine.generate(
+            args.prompt,
+            max_new_tokens=args.max_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+        )
+        print(result, flush=True)
+        print(f"\nFull text: '{args.prompt}{result}'", flush=True)
+        return 0
+
+
+def cmd_config_validate(args) -> int:
+    """Validate configuration schema."""
+    config = load_config()
+    try:
+        result = validate_config(config.to_dict())
+        print("Configuration validation: PASSED")
+        print(f"  Validated {len(result)} top-level sections")
+        for key in sorted(result.keys()):
+            print(f"  - {key}: OK")
+        return 0
+    except ConfigValidationError as e:
+        print("Configuration validation: FAILED")
+        for err in e.errors:
+            print(f"  - {err}")
+        return 1
+
+
+def cmd_config_reload(args) -> int:
+    """Trigger config hot-reload."""
+    config_path = os.environ.get("LFM3_NPU_CONFIG", "")
+    if not config_path:
+        # Try to find config file
+        from lfm3_npu.config import _find_config_file
+        config_path = _find_config_file() or ""
+
+    if not config_path:
+        print("No configuration file found. Set LFM3_NPU_CONFIG env var.")
+        return 1
+
+    print(f"Watching config file: {config_path}")
+    rc = ReloadableConfig(config_path)
+    rc.start_watching()
+
+    # Wait briefly for initial load
+    import time as _time
+    for _ in range(10):
+        cfg = rc.get()
+        if cfg is not None:
+            break
+        _time.sleep(0.5)
+
+    cfg = rc.get()
+    if cfg is None:
+        print("Failed to load configuration.")
+        rc.stop_watching()
+        return 1
+
+    print("Configuration loaded and validated successfully.")
+    print(f"  server.cpu.port: {cfg.get('server.cpu.port')}")
+    print(f"  server.npu.port: {cfg.get('server.npu.port')}")
+    print(f"  logging.level: {cfg.get('logging.level')}")
+    rc.stop_watching()
+    return 0
+
+
+def cmd_feature_flags(args) -> int:
+    """List, get, set, enable, or disable feature flags."""
+    flags = get_flags()
+
+    if args.flag_action == "list":
+        all_flags = flags.list_flags()
+        print("Feature Flags:")
+        print("=" * 60)
+        for name in sorted(all_flags.keys()):
+            flag = all_flags[name]
+            status = "ON" if flag["enabled"] else "OFF"
+            ftype = flag["type"]
+            pct = f" ({flag['percentage']}%)" if ftype == "percentage" else ""
+            print(f"  {name}: {status}{pct}  [{ftype}]")
+            if flag["description"]:
+                print(f"    {flag['description']}")
+        return 0
+
+    elif args.flag_action == "get":
+        flag = flags.get_flag(args.flag_name)
+        if flag is None:
+            print(f"Feature flag '{args.flag_name}' not found.")
+            return 1
+        import json
+        print(json.dumps(flag, indent=2))
+        return 0
+
+    elif args.flag_action == "set":
+        enabled = args.flag_value.lower() in ("true", "1", "yes", "on")
+        pct = args.percentage if args.percentage is not None else 0
+        flags.set_flag(args.flag_name, enabled, flag_type="percentage" if args.percentage is not None else "boolean", percentage=pct)
+        print(f"Feature flag '{args.flag_name}' set to {enabled}")
+        return 0
+
+    elif args.flag_action == "enable":
+        flags.set_flag(args.flag_name, True)
+        print(f"Feature flag '{args.flag_name}' enabled.")
+        return 0
+
+    elif args.flag_action == "disable":
+        flags.set_flag(args.flag_name, False)
+        print(f"Feature flag '{args.flag_name}' disabled.")
+        return 0
+
+    return 1
+
+
+def cmd_backup(args) -> int:
+    """Create, list, verify, restore, or delete backups."""
+    bm = get_backup_manager()
+
+    if args.backup_action == "create":
+        name = args.name or None
+        desc = args.description or None
+        print(f"Creating backup: {name or 'auto-generated name'}...")
+        backup_name = bm.create_backup(name=name, description=desc)
+        print(f"Backup created: {backup_name}")
+        return 0
+
+    elif args.backup_action == "list":
+        backups = bm.list_backups()
+        if not backups:
+            print("No backups found.")
+            return 0
+        print("Backups:")
+        print("=" * 80)
+        for b in backups:
+            print(f"  {b['filename']}")
+            print(f"    Created: {b['created_at']}")
+            print(f"    Size: {b['size_bytes']} bytes, Files: {b['file_count']}")
+        return 0
+
+    elif args.backup_action == "verify":
+        result = bm.verify_backup(args.backup_name)
+        if result["valid"]:
+            print(f"Backup '{args.backup_name}': VALID")
+            print(f"  Verified {result['verified_files']} files")
+        else:
+            print(f"Backup '{args.backup_name}': INVALID")
+            if result.get("error"):
+                print(f"  Error: {result['error']}")
+            for f in result.get("failed_files", []):
+                print(f"  Failed: {f['path']} - {f.get('error', 'unknown')}")
+            return 1
+        return 0
+
+    elif args.backup_action == "restore":
+        dest = args.destination or "/"
+        print(f"Restoring backup '{args.backup_name}' to {dest}...")
+        bm.restore_backup(args.backup_name, destination=dest)
+        print(f"Backup restored to {dest}")
+        return 0
+
+    elif args.backup_action == "delete":
+        bm.delete_backup(args.backup_name)
+        print(f"Backup '{args.backup_name}' deleted.")
+        return 0
+
+    return 1
+
+
+def cmd_audit(args) -> int:
+    """Show recent audit log entries."""
+    import glob
+    import json
+
+    audit_dir = "/media/scott/data/lfm3-npu-tool/var/log"
+    audit_files = sorted(glob.glob(os.path.join(audit_dir, "audit*.log")) + 
+                         glob.glob(os.path.join(audit_dir, "*.jsonl")))
+
+    if not audit_files:
+        print("No audit log files found.")
+        return 0
+
+    limit = args.limit or 50
+    count = 0
+    for afile in reversed(audit_files):
+        try:
+            with open(afile, "r") as f:
+                for line in reversed(f.readlines()):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        print(json.dumps(entry, indent=None))
+                        count += 1
+                        if count >= limit:
+                            return 0
+                    except json.JSONDecodeError:
+                        print(line)
+                        count += 1
+                        if count >= limit:
+                            return 0
+        except Exception as e:
+            print(f"Error reading {afile}: {e}")
+    return 0
     """Generate text via HTTP API (cpu or npu server)."""
     _apply_tls_args(args)
     if args.server == "npu":
@@ -1499,6 +1755,80 @@ def main() -> int:
         "recover", help="Recover all LFM3 servers (stop, start, wait for health)"
     )
     recover_parser.set_defaults(func=cmd_recover)
+
+    # config-validate
+    config_val_parser = subparsers.add_parser(
+        "config-validate", help="Validate configuration schema"
+    )
+    config_val_parser.set_defaults(func=cmd_config_validate)
+
+    # config-reload
+    config_reload_parser = subparsers.add_parser(
+        "config-reload", help="Trigger config hot-reload"
+    )
+    config_reload_parser.set_defaults(func=cmd_config_reload)
+
+    # feature-flags
+    ff_parser = subparsers.add_parser(
+        "feature-flags", help="Manage feature flags"
+    )
+    ff_subparsers = ff_parser.add_subparsers(dest="flag_action", help="Feature flag action")
+
+    ff_list_parser = ff_subparsers.add_parser("list", help="List all feature flags")
+    ff_list_parser.set_defaults(func=cmd_feature_flags)
+
+    ff_get_parser = ff_subparsers.add_parser("get", help="Get a specific feature flag")
+    ff_get_parser.add_argument("flag_name", help="Feature flag name")
+    ff_get_parser.set_defaults(func=cmd_feature_flags)
+
+    ff_set_parser = ff_subparsers.add_parser("set", help="Set a feature flag")
+    ff_set_parser.add_argument("flag_name", help="Feature flag name")
+    ff_set_parser.add_argument("flag_value", choices=["true", "false"], help="Flag value")
+    ff_set_parser.add_argument("--percentage", type=int, default=None,
+                               help="Percentage for rollout (0-100)")
+    ff_set_parser.set_defaults(func=cmd_feature_flags)
+
+    ff_enable_parser = ff_subparsers.add_parser("enable", help="Enable a feature flag")
+    ff_enable_parser.add_argument("flag_name", help="Feature flag name")
+    ff_enable_parser.set_defaults(func=cmd_feature_flags)
+
+    ff_disable_parser = ff_subparsers.add_parser("disable", help="Disable a feature flag")
+    ff_disable_parser.add_argument("flag_name", help="Feature flag name")
+    ff_disable_parser.set_defaults(func=cmd_feature_flags)
+
+    # backup
+    backup_parser = subparsers.add_parser(
+        "backup", help="Manage backups"
+    )
+    backup_subparsers = backup_parser.add_subparsers(dest="backup_action", help="Backup action")
+
+    backup_create_parser = backup_subparsers.add_parser("create", help="Create a backup")
+    backup_create_parser.add_argument("--name", default=None, help="Backup name")
+    backup_create_parser.add_argument("--description", default=None, help="Backup description")
+    backup_create_parser.set_defaults(func=cmd_backup)
+
+    backup_list_parser = backup_subparsers.add_parser("list", help="List all backups")
+    backup_list_parser.set_defaults(func=cmd_backup)
+
+    backup_verify_parser = backup_subparsers.add_parser("verify", help="Verify backup integrity")
+    backup_verify_parser.add_argument("backup_name", help="Backup name")
+    backup_verify_parser.set_defaults(func=cmd_backup)
+
+    backup_restore_parser = backup_subparsers.add_parser("restore", help="Restore a backup")
+    backup_restore_parser.add_argument("backup_name", help="Backup name")
+    backup_restore_parser.add_argument("--destination", default="/", help="Restore destination")
+    backup_restore_parser.set_defaults(func=cmd_backup)
+
+    backup_delete_parser = backup_subparsers.add_parser("delete", help="Delete a backup")
+    backup_delete_parser.add_argument("backup_name", help="Backup name")
+    backup_delete_parser.set_defaults(func=cmd_backup)
+
+    # audit
+    audit_parser = subparsers.add_parser(
+        "audit", help="Show recent audit log entries"
+    )
+    audit_parser.add_argument("--limit", type=int, default=50, help="Max entries to show")
+    audit_parser.set_defaults(func=cmd_audit)
 
     args = parser.parse_args()
 

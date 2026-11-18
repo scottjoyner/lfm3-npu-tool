@@ -1457,6 +1457,125 @@ def test_backup_corrupt_detection():
     print("  ✓ Corrupt backup detection works")
 
 
+# ---------------------------------------------------------------------------
+# CLI integration tests for new enterprise commands
+# ---------------------------------------------------------------------------
+
+
+def test_cli_config_validate():
+    """Test CLI config-validate command."""
+    import subprocess
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"), "config-validate"],
+        capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, f"config-validate failed: {result.stderr}"
+    assert "PASSED" in result.stdout
+    print("  ✓ CLI config-validate works")
+
+
+def test_cli_feature_flags_list():
+    """Test CLI feature-flags list command."""
+    import subprocess
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "feature-flags", "list"],
+        capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, f"feature-flags list failed: {result.stderr}"
+    assert "npu_inference_enabled" in result.stdout
+    assert "premium_features" in result.stdout
+    print("  ✓ CLI feature-flags list works")
+
+
+def test_cli_feature_flags_get():
+    """Test CLI feature-flags get command."""
+    import subprocess, json
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "feature-flags", "get", "npu_inference_enabled"],
+        capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, f"feature-flags get failed: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert data["enabled"] is True
+    print("  ✓ CLI feature-flags get works")
+
+
+def test_cli_feature_flags_enable_disable():
+    """Test CLI feature-flags enable/disable commands."""
+    import subprocess
+    # Disable premium_features
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "feature-flags", "disable", "premium_features"],
+        capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0
+    assert "disabled" in result.stdout
+
+    # Enable premium_features
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "feature-flags", "enable", "premium_features"],
+        capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0
+    assert "enabled" in result.stdout
+    print("  ✓ CLI feature-flags enable/disable works")
+
+
+def test_cli_backup_create_list_delete():
+    """Test CLI backup create/list/delete commands."""
+    import subprocess, os, tempfile
+    # Set a temp backup dir
+    env = os.environ.copy()
+    env["LFM3_BACKUP_DIR"] = tempfile.mkdtemp()
+
+    # Create
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "backup", "create", "--name", "cli-test-backup",
+         "--description", "CLI integration test"],
+        capture_output=True, text=True, timeout=30, env=env
+    )
+    assert result.returncode == 0, f"backup create failed: {result.stderr}"
+    assert "cli-test-backup" in result.stdout
+
+    # List
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "backup", "list"],
+        capture_output=True, text=True, timeout=30, env=env
+    )
+    assert result.returncode == 0
+    assert "cli-test-backup" in result.stdout
+
+    # Delete
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "backup", "delete", "cli-test-backup"],
+        capture_output=True, text=True, timeout=30, env=env
+    )
+    assert result.returncode == 0
+    assert "deleted" in result.stdout.lower()
+    print("  ✓ CLI backup create/list/delete works")
+
+
+def test_cli_has_new_commands():
+    """Test that CLI has all new enterprise commands."""
+    import subprocess
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"), "--help"],
+        capture_output=True, text=True, timeout=10
+    )
+    output = result.stdout
+    for cmd in ["config-validate", "config-reload", "feature-flags",
+                "backup", "audit"]:
+        assert cmd in output, f"CLI should have {cmd} command"
+    print("  ✓ CLI has all new enterprise commands")
+
+
 def main():
     """Run all tests."""
     print("Running LFM3-1.7B NPU tooling tests...\n")
@@ -1501,6 +1620,11 @@ def main():
         test_ssl_context_returns_context_when_ready,
         test_tls_service_files_document_env,
         test_cli_has_tls_flags,
+        test_cli_config_validate,
+        test_cli_feature_flags_list,
+        test_cli_feature_flags_get,
+        test_cli_feature_flags_enable_disable,
+        test_cli_backup_create_list_delete,
         test_slo_module_imports,
         test_slo_tracker_record_and_snapshot,
         test_slo_prometheus_metrics,

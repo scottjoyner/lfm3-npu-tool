@@ -9,6 +9,8 @@ __pycache__/
 /models/
 var/log/
 var/run/
+var/feature_flags.json
+var/backups/
 .venv/
 .env
 *.swp
