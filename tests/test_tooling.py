@@ -1214,6 +1214,161 @@ def test_audit_file_handler_rotation():
         os.unlink(tmp_path)
 
 
+# ---------------------------------------------------------------------------
+# Feature flags tests
+# ---------------------------------------------------------------------------
+
+
+def test_feature_flags_imports():
+    """Test that the feature flags module imports cleanly."""
+    from lfm3_npu.feature_flags import FeatureFlags, DEFAULT_FLAGS
+    assert callable(FeatureFlags)
+    assert isinstance(DEFAULT_FLAGS, dict)
+    assert len(DEFAULT_FLAGS) > 0
+    print("  ✓ Feature flags module imports work")
+
+
+def test_feature_flags_boolean():
+    """Test boolean feature flags."""
+    import tempfile, os
+    from lfm3_npu.feature_flags import FeatureFlags
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        flags = FeatureFlags(tmp_path)
+        assert flags.is_enabled("npu_inference_enabled") == True
+        assert flags.is_enabled("premium_features") == False
+
+        flags.set_flag("premium_features", True)
+        assert flags.is_enabled("premium_features") == True
+
+        flags.set_flag("premium_features", False)
+        assert flags.is_enabled("premium_features") == False
+        print("  ✓ Boolean feature flags work")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_feature_flags_whitelist_blacklist():
+    """Test whitelist and blacklist for feature flags."""
+    import tempfile, os
+    from lfm3_npu.feature_flags import FeatureFlags
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        flags = FeatureFlags(tmp_path)
+        flags.set_flag("premium_features", False)
+        assert flags.is_enabled("premium_features", "client-A") == False
+
+        flags.add_whitelist("premium_features", "client-A")
+        assert flags.is_enabled("premium_features", "client-A") == True
+        assert flags.is_enabled("premium_features", "client-B") == False
+
+        flags.add_blacklist("npu_inference_enabled", "client-B")
+        assert flags.is_enabled("npu_inference_enabled", "client-B") == False
+        assert flags.is_enabled("npu_inference_enabled", "client-A") == True
+        print("  ✓ Whitelist and blacklist work")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_feature_flags_percentage():
+    """Test percentage-based rollout."""
+    import tempfile, os
+    from lfm3_npu.feature_flags import FeatureFlags
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        flags = FeatureFlags(tmp_path)
+        flags.set_flag("new_routing_algorithm", True, flag_type="percentage", percentage=50)
+
+        enabled_count = sum(
+            1 for i in range(1000)
+            if flags.is_enabled("new_routing_algorithm", f"client-{i}")
+        )
+        assert 400 < enabled_count < 600, f"Expected ~500, got {enabled_count}"
+
+        # Consistency: same client always gets same result
+        results = [flags.is_enabled("new_routing_algorithm", "client-consistent") for _ in range(100)]
+        assert all(r == results[0] for r in results), "Inconsistent rollout!"
+        print("  ✓ Percentage-based rollout works")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_feature_flags_persistence():
+    """Test that feature flags persist to disk."""
+    import tempfile, os
+    from lfm3_npu.feature_flags import FeatureFlags
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        flags = FeatureFlags(tmp_path)
+        flags.set_flag("premium_features", True)
+        flags.add_whitelist("premium_features", "client-A")
+
+        # Create new instance from same file
+        flags2 = FeatureFlags(tmp_path)
+        assert flags2.is_enabled("premium_features") == True
+        assert flags2.is_enabled("premium_features", "client-A") == True
+        print("  ✓ Feature flags persist to disk")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_feature_flags_callbacks():
+    """Test that feature flag change callbacks work."""
+    import tempfile, os
+    from lfm3_npu.feature_flags import FeatureFlags
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        flags = FeatureFlags(tmp_path)
+        callback_called = []
+        flags.add_callback(lambda name, enabled: callback_called.append((name, enabled)))
+
+        flags.set_flag("premium_features", True)
+        assert len(callback_called) >= 1
+        assert callback_called[-1] == ("premium_features", True)
+        print("  ✓ Feature flag callbacks work")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_feature_flags_delete():
+    """Test deleting custom flags and protecting built-in flags."""
+    import tempfile, os
+    from lfm3_npu.feature_flags import FeatureFlags
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        flags = FeatureFlags(tmp_path)
+        flags.set_flag("temp_feature", True)
+        assert flags.is_enabled("temp_feature") == True
+
+        flags.delete_flag("temp_feature")
+        assert flags.is_enabled("temp_feature") == False
+
+        # Cannot delete built-in flags
+        flags.delete_flag("npu_inference_enabled")
+        assert flags.is_enabled("npu_inference_enabled") == True
+        print("  ✓ Flag deletion works, built-ins protected")
+    finally:
+        os.unlink(tmp_path)
+
+
 
 
 def main():
@@ -1289,6 +1444,13 @@ def main():
         test_reloadable_config_hot_reload,
         test_audit_log_persistence,
         test_audit_file_handler_rotation,
+        test_feature_flags_imports,
+        test_feature_flags_boolean,
+        test_feature_flags_whitelist_blacklist,
+        test_feature_flags_percentage,
+        test_feature_flags_persistence,
+        test_feature_flags_callbacks,
+        test_feature_flags_delete,
         test_startup_validate_service_exists,
     ]
 
