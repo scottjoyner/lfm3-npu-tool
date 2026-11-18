@@ -22,7 +22,8 @@ Environment=LFM3_ENV=production
 # Environment=LFM3_TLS_ENABLED=true
 # Environment=LFM3_TLS_DIR=/media/scott/data/lfm3-npu-tool/etc/tls
 # Enterprise: rate limiting (requests per minute, burst). Uncomment & set API keys in production.
-# Environment=LFM3_API_KEYS=sk-live-abc123:prod-web
+# Environment=LFM3_API_KEYS=sk-live-abc123:admin:prod-web,sk-view-key:viewer:monitor  (format: key:role:label)
+# Roles: admin (full access), operator (read+write), viewer (read-only), auditor (read+audit)
 # Environment=LFM3_RATE_LIMIT_RPM=60
 # Environment=LFM3_RATE_LIMIT_BURST=10
 # Enterprise: SLO targets

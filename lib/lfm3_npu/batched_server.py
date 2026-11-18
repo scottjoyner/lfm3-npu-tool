@@ -50,6 +50,7 @@ from lfm3_npu.validation import (
 )
 from lfm3_npu.security_headers import SecurityHeadersMiddleware
 from lfm3_npu.audit import get_audit
+from lfm3_npu.rbac import RBACAuth, role_required
 
 
 # ====================================================================== #
@@ -92,6 +93,15 @@ _circuit_breaker = CircuitBreaker(
 
 print(f"{SERVER_NAME}: Rate limiting {_rate_limiter.rate:.2f} req/s (burst {_rate_limiter.capacity})", flush=True)
 print(f"{SERVER_NAME}: Circuit breaker threshold={_circuit_breaker.failure_threshold}, recovery={_circuit_breaker.recovery_timeout}s", flush=True)
+
+# Enterprise: RBAC authentication
+_rbac_auth = RBACAuth()
+if _rbac_auth.enabled:
+    key_infos = _rbac_auth.list_keys()
+    roles = {ki["role"] for ki in key_infos.values()}
+    print(f"{SERVER_NAME}: RBAC authentication enabled ({len(key_infos)} key(s), roles: {sorted(roles)})", flush=True)
+else:
+    print(f"{SERVER_NAME}: RBAC authentication disabled (open access)", flush=True)
 
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
@@ -624,12 +634,18 @@ API_KEY = os.environ.get("LFM3_API_KEY", "")
 
 
 async def verify_api_key(request: Request):
-    """Validate API key if LFM3_API_KEY is configured."""
-    if not API_KEY:
-        return  # No API key configured - allow all requests
-    provided_key = request.headers.get("X-API-Key")
-    if provided_key != API_KEY:
+    """Validate API key using RBAC authentication."""
+    key_info = _rbac_auth.authenticate(
+        request.headers.get("authorization", "").replace("Bearer ", "", 1)
+        if request.headers.get("authorization", "").lower().startswith("bearer ")
+        else request.headers.get("x-api-key")
+    )
+    if key_info is None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    request.state.api_key_info = key_info
+    request.state.api_key_label = key_info.label
+    request.state.api_key_hash = key_info.key_hash
+    request.state.api_key_role = key_info.role
 
 
 async def check_rate_limit(request: Request):
@@ -695,14 +711,24 @@ async def readiness():
 
 
 @app.get("/slo")
-async def slo_report():
+async def slo_report(request: Request, _=Depends(verify_api_key)):
     """Service-Level Objective report: availability, latency p95, error budget."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/slo")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return _slo_tracker.snapshot()
 
 
 @app.get("/version")
-async def version():
+async def version(request: Request, _=Depends(verify_api_key)):
     """Version info for the server."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/version")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return {
         "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
         "provider": PROVIDER,
@@ -713,8 +739,13 @@ async def version():
 
 
 @app.post("/shutdown")
-async def shutdown():
+async def shutdown(request: Request, _=Depends(verify_api_key)):
     """Initiate graceful shutdown (drain in-flight requests, then stop)."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/shutdown")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     global _shutting_down
     _shutting_down = True
     return {"status": "shutting_down", "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}"}
@@ -742,9 +773,14 @@ async def model_info():
 
 
 @app.get("/metrics")
-async def metrics_endpoint():
+async def metrics_endpoint(request: Request, _=Depends(verify_api_key)):
     if metrics is None:
         raise HTTPException(status_code=503, detail="Metrics not initialized")
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/metrics")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     batcher_metrics = batcher.get_metrics() if batcher else {}
     prometheus_text = metrics.get_metrics()
     if isinstance(prometheus_text, bytes):
@@ -761,8 +797,13 @@ async def metrics_endpoint():
 
 
 @app.get("/v1/batch/status")
-async def batch_status():
+async def batch_status(request: Request, _=Depends(verify_api_key)):
     """Return continuous batcher status."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/batch/status")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     if batcher is None:
         raise HTTPException(status_code=503, detail="Batcher not initialized")
     return {
@@ -776,8 +817,13 @@ async def batch_status():
 
 
 @app.get("/v1/metrics/detailed")
-async def detailed_metrics():
+async def detailed_metrics(request: Request, _=Depends(verify_api_key)):
     """Return detailed per-request metrics."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/metrics/detailed")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     if batcher is None:
         raise HTTPException(status_code=503, detail="Batcher not initialized")
 
@@ -828,6 +874,7 @@ async def detailed_metrics():
 
 @app.get("/v1/traces")
 async def trace_history(
+    request: Request, _=Depends(verify_api_key),
     limit: int = 50,
     provider: Optional[str] = None,
     error_only: bool = False,
@@ -839,6 +886,11 @@ async def trace_history(
     - provider: Filter by provider (CPUExecutionProvider or VitisAIExecutionProvider)
     - error_only: Only return requests with errors
     """
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/traces")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     limit = min(max(limit, 1), 500)
     traces = await _get_trace_history(limit=limit, provider=provider, error_only=error_only)
     return {
@@ -851,18 +903,28 @@ async def trace_history(
 
 
 @app.get("/v1/metrics/endpoints")
-async def endpoint_metrics():
+async def endpoint_metrics(request: Request, _=Depends(verify_api_key)):
     """Return per-endpoint request metrics (count, latency, error rate)."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/metrics/endpoints")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return _get_endpoint_metrics()
 
 
 @app.get("/v1/fleet/status")
-async def fleet_status():
+async def fleet_status(request: Request, _=Depends(verify_api_key)):
     """Return fleet-compatible status for monitoring aggregation.
 
     Returns server health, performance metrics, and capacity info
     suitable for consumption by fleet monitoring systems.
     """
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/fleet/status")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     if batcher is None:
         raise HTTPException(status_code=503, detail="Batcher not initialized")
 
@@ -918,8 +980,21 @@ async def chat_completions(
     request: Request, req: ChatCompletionRequest,
     _=Depends(verify_api_key), __=Depends(check_rate_limit)
 ):
-    if batcher is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    try:
+        return await _chat_completions_impl(request, req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"CHAT_COMPLETIONS ERROR: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+
+
+async def _chat_completions_impl(
+    request: Request, req: ChatCompletionRequest,
+    _=Depends(verify_api_key), __=Depends(check_rate_limit)
+):
 
     # Enterprise: graceful shutdown - reject new requests while draining
     if _shutting_down:
@@ -951,6 +1026,7 @@ async def chat_completions(
     # Enterprise: input validation
     api_key_label = getattr(request.state, "api_key_label", None)
     api_key_hash = getattr(request.state, "api_key_hash", None)
+    api_key_role = getattr(request.state, "api_key_role", None)
     try:
         validate_client(api_key_label or client_ip)
         validate_messages(req.messages)
@@ -970,6 +1046,46 @@ async def chat_completions(
     # Enterprise: audit - authentication success
     if api_key_label:
         _audit.auth_success(actor=api_key_hash or client_ip, actor_type="api_key", request_id=request_id)
+
+    # Enterprise: RBAC permission check - write access required for inference
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "write", "/v1/chat/completions")
+    except PermissionError as e:
+        _audit.authz_denied(
+            actor=api_key_hash or client_ip,
+            resource="/v1/chat/completions",
+            request_id=request_id,
+        )
+        log_event(
+            "authz.denied",
+            request_id=request_id,
+            client_ip=client_ip,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=403,
+            extra={"required": "write", "role": api_key_role},
+        )
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"RBAC ERROR: {e}\n{tb}", flush=True)
+        _audit.authz_denied(
+            actor=api_key_hash or client_ip,
+            resource="/v1/chat/completions",
+            request_id=request_id,
+        )
+        log_event(
+            "authz.error",
+            request_id=request_id,
+            client_ip=client_ip,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=500,
+            extra={"error": str(e), "role": api_key_role},
+        )
+        raise HTTPException(status_code=500, detail=f"RBAC error: {e}")
 
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",

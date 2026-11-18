@@ -457,11 +457,19 @@ class EnterpriseMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         client_ip = request.client.host if request.client else "unknown"
         api_key = _extract_api_key(request)
-        api_key_label = self.auth.authenticate(api_key)
-        api_key_hash = _hash_key(api_key) if api_key else None
+        auth_result = self.auth.authenticate(api_key)
+        # Extract label string from KeyInfo (RBAC) or use directly (legacy string)
+        if hasattr(auth_result, 'label'):
+            api_key_label = auth_result.label
+            api_key_role = auth_result.role
+            api_key_hash = auth_result.key_hash if auth_result.key_hash else _hash_key(api_key) if api_key else None
+        else:
+            api_key_label = auth_result  # legacy string return
+            api_key_role = None
+            api_key_hash = _hash_key(api_key) if api_key else None
 
         # Authentication
-        if self.auth.enabled and api_key_label is None:
+        if self.auth.enabled and auth_result is None:
             log_event(
                 "auth.rejected",
                 request_id=request_id,
@@ -503,6 +511,8 @@ class EnterpriseMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         request.state.api_key_label = api_key_label
         request.state.api_key_hash = api_key_hash
+        if api_key_role:
+            request.state.api_key_role = api_key_role
 
         try:
             response = await call_next(request)

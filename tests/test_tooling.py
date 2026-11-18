@@ -1372,6 +1372,181 @@ def test_feature_flags_delete():
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# RBAC tests
+# ---------------------------------------------------------------------------
+
+
+def test_rbac_module_imports():
+    """Test that the RBAC module imports cleanly."""
+    from lfm3_npu.rbac import RBACAuth, KeyInfo, has_permission, role_level, role_required
+    assert callable(RBACAuth)
+    assert callable(KeyInfo)
+    assert callable(has_permission)
+    assert callable(role_level)
+    assert callable(role_required)
+    print("  ✓ RBAC module imports work")
+
+
+def test_rbac_role_permissions():
+    """Test role-based permission checks."""
+    from lfm3_npu.rbac import has_permission, ROLE_PERMISSIONS
+
+    # Admin has all permissions
+    for perm in ["read", "write", "admin", "audit"]:
+        assert has_permission("admin", perm), f"admin should have {perm}"
+
+    # Operator has read + write
+    assert has_permission("operator", "read")
+    assert has_permission("operator", "write")
+    assert not has_permission("operator", "admin")
+    assert not has_permission("operator", "audit")
+
+    # Viewer has read only
+    assert has_permission("viewer", "read")
+    assert not has_permission("viewer", "write")
+    assert not has_permission("viewer", "admin")
+
+    # Auditor has read + audit
+    assert has_permission("auditor", "read")
+    assert has_permission("auditor", "audit")
+    assert not has_permission("auditor", "write")
+    print("  ✓ Role-based permissions work")
+
+
+def test_rbac_role_hierarchy():
+    """Test role hierarchy levels."""
+    from lfm3_npu.rbac import role_level
+
+    assert role_level("viewer") == 0
+    assert role_level("auditor") == 0
+    assert role_level("operator") == 1
+    assert role_level("admin") == 2
+    assert role_level("unknown") == 0
+    print("  ✓ Role hierarchy works")
+
+
+def test_rbac_auth_no_keys():
+    """Test RBAC auth with no keys configured (open access)."""
+    import os
+    from lfm3_npu.rbac import RBACAuth
+    os.environ.pop("LFM3_API_KEYS", None)
+    # Need to create a fresh instance
+    auth = RBACAuth.__new__(RBACAuth)
+    RBACAuth.__init__(auth)
+    assert not auth.enabled
+    key_info = auth.authenticate("any-key")
+    assert key_info is not None
+    assert key_info.role == "viewer"
+    assert key_info.label == "anonymous"
+    print("  ✓ RBAC open access works")
+
+
+def test_rbac_auth_with_keys():
+    """Test RBAC auth with keys configured."""
+    import os
+    from lfm3_npu.rbac import RBACAuth
+    os.environ["LFM3_API_KEYS"] = "sk-admin-key:admin:prod-admin,sk-view-key:viewer:monitor"
+    auth = RBACAuth.__new__(RBACAuth)
+    RBACAuth.__init__(auth)
+    assert auth.enabled
+
+    # Admin key
+    admin_info = auth.authenticate("sk-admin-key")
+    assert admin_info is not None
+    assert admin_info.role == "admin"
+    assert admin_info.label == "prod-admin"
+    assert admin_info.has_permission("admin")
+    assert admin_info.has_permission("write")
+    assert admin_info.has_permission("read")
+
+    # Viewer key
+    viewer_info = auth.authenticate("sk-view-key")
+    assert viewer_info is not None
+    assert viewer_info.role == "viewer"
+    assert viewer_info.has_permission("read")
+    assert not viewer_info.has_permission("write")
+
+    # Invalid key
+    assert auth.authenticate("bad-key") is None
+    print("  ✓ RBAC auth with keys works")
+
+
+def test_rbac_require_permission():
+    """Test require_permission raises on insufficient permissions."""
+    import os
+    from lfm3_npu.rbac import RBACAuth
+    os.environ["LFM3_API_KEYS"] = "sk-view-key:viewer:monitor"
+    auth = RBACAuth.__new__(RBACAuth)
+    RBACAuth.__init__(auth)
+
+    viewer_info = auth.authenticate("sk-view-key")
+
+    # Viewer can read
+    auth.require_permission(viewer_info, "read", "/health")  # should not raise
+
+    # Viewer cannot write
+    try:
+        auth.require_permission(viewer_info, "write", "/v1/chat/completions")
+        assert False, "Should have raised PermissionError"
+    except PermissionError as e:
+        assert "write" in str(e)
+        assert "viewer" in str(e)
+    print("  ✓ RBAC require_permission works")
+
+
+def test_rbac_require_role():
+    """Test require_role raises on insufficient role level."""
+    import os
+    from lfm3_npu.rbac import RBACAuth
+    os.environ["LFM3_API_KEYS"] = "sk-view-key:viewer:monitor,sk-admin-key:admin:admin"
+    auth = RBACAuth.__new__(RBACAuth)
+    RBACAuth.__init__(auth)
+
+    viewer_info = auth.authenticate("sk-view-key")
+    admin_info = auth.authenticate("sk-admin-key")
+
+    # Admin can do admin operations
+    auth.require_role(admin_info, "admin", "/shutdown")  # should not raise
+
+    # Viewer cannot do admin operations
+    try:
+        auth.require_role(viewer_info, "admin", "/shutdown")
+        assert False, "Should have raised PermissionError"
+    except PermissionError as e:
+        assert "admin" in str(e)
+        assert "viewer" in str(e)
+    print("  ✓ RBAC require_role works")
+
+
+def test_rbac_endpoint_permissions():
+    """Test endpoint permission mapping."""
+    from lfm3_npu.rbac import role_required
+
+    assert role_required("/health") == "read"
+    assert role_required("/v1/chat/completions") == "write"
+    assert role_required("/shutdown") == "admin"
+    assert role_required("/slo") == "read"
+    assert role_required("/unknown") == "read"  # default
+    print("  ✓ Endpoint permission mapping works")
+
+
+def test_rbac_key_info_dict():
+    """Test KeyInfo serialization."""
+    from lfm3_npu.rbac import KeyInfo
+    info = KeyInfo("abc123", "operator", "ops-key")
+    d = info.to_dict()
+    assert d["key_hash"] == "abc123"
+    assert d["role"] == "operator"
+    assert d["label"] == "ops-key"
+    assert info.has_permission("read")
+    assert info.has_permission("write")
+    assert not info.has_permission("admin")
+    print("  ✓ KeyInfo serialization works")
+
+
 # ---------------------------------------------------------------------------
 # Backup/restore tests
 # ---------------------------------------------------------------------------
@@ -1661,6 +1836,15 @@ def main():
         test_feature_flags_persistence,
         test_feature_flags_callbacks,
         test_feature_flags_delete,
+        test_rbac_module_imports,
+        test_rbac_role_permissions,
+        test_rbac_role_hierarchy,
+        test_rbac_auth_no_keys,
+        test_rbac_auth_with_keys,
+        test_rbac_require_permission,
+        test_rbac_require_role,
+        test_rbac_endpoint_permissions,
+        test_rbac_key_info_dict,
         test_backup_restore_imports,
         test_backup_create_verify_restore,
         test_backup_corrupt_detection,
