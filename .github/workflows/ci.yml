@@ -5,6 +5,13 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      npu_admitted:
+        description: "Explicit hardware run; requires owner-set NPU_CI_HARDWARE_APPROVED repository variable"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   unit-tests:
@@ -132,6 +139,9 @@ jobs:
 
   # NPU integration tests (requires NPU hardware - self-hosted runner)
   integration-npu:
+    # Never auto-enqueue on PR/push; hardware lane needs explicit opt-in
+    # AND separately provisioned, approved runner admission.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.npu_admitted == true && vars.NPU_CI_HARDWARE_APPROVED == 'true' }}
     runs-on: [self-hosted, npu]
     needs: [integration-cpu]
     timeout-minutes: 30
