@@ -746,7 +746,6 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
 
     latency_ms = (time.perf_counter() - overall_start) * 1000
     completion_tokens = len(tokenizer.encode(result).ids) if tokenizer else 0
-    total_tokens = prompt_tokens + completion_tokens
     decode_tps = (completion_tokens / (latency_ms / 1000.0)) if latency_ms > 0 else 0.0
 
     log_event(
