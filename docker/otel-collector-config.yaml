@@ -17,7 +17,10 @@ processors:
 
 exporters:
   otlp:
-    endpoint: jaeger:4318
+    # Jaeger's OTLP HTTP receiver expects /api/otlp/v1/traces. The OTel
+    # exporter appends "/v1/traces" to the endpoint, so we include the
+    # "/api/otlp" prefix here to produce /api/otlp/v1/traces.
+    endpoint: jaeger:4318/api/otlp
     tls:
       insecure: true
 

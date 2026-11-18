@@ -263,6 +263,224 @@ def test_quality_monitor_writes_state():
     print("  ✓ Quality monitor writes state file")
 
 
+# ---------------------------------------------------------------------------
+# Enterprise middleware tests
+# ---------------------------------------------------------------------------
+
+
+def test_enterprise_module_imports():
+    """Test that the enterprise middleware module imports cleanly."""
+    from lfm3_npu.enterprise import (
+        APIKeyAuth,
+        RateLimiter,
+        CircuitBreaker,
+        CircuitOpenError,
+        EnterpriseMiddleware,
+        log_event,
+        require_api_key,
+    )
+    assert callable(APIKeyAuth)
+    assert callable(RateLimiter)
+    assert callable(CircuitBreaker)
+    assert issubclass(CircuitOpenError, Exception)
+    print("  ✓ Enterprise module imports work")
+
+
+def test_api_key_auth():
+    """Test API key authentication behavior."""
+    import os
+    from lfm3_npu.enterprise import APIKeyAuth
+
+    # No keys configured -> open access
+    os.environ.pop("LFM3_API_KEYS", None)
+    auth = APIKeyAuth()
+    assert not auth.enabled
+    assert auth.authenticate(None) == "anonymous"
+    assert auth.authenticate("anything") == "anonymous"
+
+    # Keys configured -> strict validation
+    os.environ["LFM3_API_KEYS"] = "sk-live-abc123:prod-web,sk-live-def456:dev-cli"
+    # Force re-init by creating a fresh instance (module caches nothing global here)
+    auth2 = APIKeyAuth.__new__(APIKeyAuth)
+    APIKeyAuth.__init__(auth2)
+    assert auth2.enabled is True
+    assert auth2.authenticate("sk-live-abc123") == "prod-web"
+    assert auth2.authenticate("sk-live-def456") == "dev-cli"
+    assert auth2.authenticate("wrong-key") is None
+    assert auth2.authenticate(None) is None
+    assert auth2.authenticate("") is None
+    print("  ✓ API key authentication works")
+
+
+def test_rate_limiter():
+    """Test token bucket rate limiting behavior."""
+    from lfm3_npu.enterprise import RateLimiter
+
+    # High rate, small burst: allow burst then reject
+    limiter = RateLimiter.__new__(RateLimiter)
+    RateLimiter.__init__(limiter)
+    limiter.rate = 1000.0  # effectively unlimited refill for this test
+    limiter.capacity = 3
+
+    class FakeRequest:
+        class Client:
+            host = "10.0.0.1"
+        client = Client()
+
+    req = FakeRequest()
+
+    # First 3 allowed (burst=3)
+    for i in range(3):
+        assert limiter.allow(req, None) is None, f"request {i} should be allowed"
+
+    # 4th should be rate limited
+    retry = limiter.allow(req, None)
+    assert retry is not None and retry > 0, "4th request should be rate limited"
+    print("  ✓ Rate limiter enforces burst limit")
+
+
+def test_circuit_breaker():
+    """Test circuit breaker open / half-open / closed transitions."""
+    from lfm3_npu.enterprise import CircuitBreaker, CircuitOpenError
+
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1)
+
+    # Closed: calls succeed
+    for _ in range(2):
+        with cb.call("test"):
+            pass
+    assert cb.state == CircuitBreaker.CLOSED
+
+    # Two consecutive failures open the circuit
+    for _ in range(2):
+        try:
+            with cb.call("test"):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+    assert cb.state == CircuitBreaker.OPEN
+
+    # Open: calls are rejected immediately
+    try:
+        with cb.call("test"):
+            pass
+        assert False, "should have raised CircuitOpenError"
+    except CircuitOpenError as e:
+        assert e.retry_after > 0
+
+    # Wait for recovery timeout -> half-open allows one trial
+    import time
+    time.sleep(0.15)
+    try:
+        with cb.call("test"):
+            pass  # trial succeeds
+        assert cb.state == CircuitBreaker.CLOSED
+    except CircuitOpenError:
+        assert False, "half-open trial should succeed"
+    print("  ✓ Circuit breaker open/half-open/closed transitions work")
+
+
+def test_structured_logging():
+    """Test structured JSON log event emission."""
+    from lfm3_npu.enterprise import log_event, get_logger, _JsonFormatter
+    import io
+    import logging
+    import json
+
+    logger = get_logger()
+    # Swap in a StringIO stream handler so we can assert on the JSON output
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(_JsonFormatter())
+    logger.handlers = [handler]
+
+    log_event(
+        "test.event",
+        request_id="req-123",
+        client_ip="10.0.0.1",
+        status_code=200,
+        latency_ms=42.5,
+        provider="CPUExecutionProvider",
+    )
+    output = stream.getvalue()
+    assert "req-123" in output
+    assert "10.0.0.1" in output
+    assert "200" in output
+    assert "42.5" in output
+    assert "CPUExecutionProvider" in output
+    parsed = json.loads(output.strip().splitlines()[-1])
+    assert parsed["request_id"] == "req-123"
+    assert parsed["status_code"] == 200
+    print("  ✓ Structured logging emits valid JSON")
+
+
+def test_config_has_enterprise_defaults():
+    """Test that config documents enterprise sections."""
+    from lfm3_npu import load_config
+    config = load_config()
+    assert "security" in config.to_dict(), "Config should document security section"
+    assert "rate_limit" in config.to_dict(), "Config should document rate_limit section"
+    assert "circuit_breaker" in config.to_dict(), "Config should document circuit_breaker section"
+    print("  ✓ Config documents enterprise sections")
+
+
+def test_cpu_service_has_enterprise_env():
+    """Test that CPU systemd service documents enterprise env vars."""
+    import os
+    svc_path = os.path.join(SERVER_DIR, "etc", "lfm3-npu-cpu.service")
+    assert os.path.exists(svc_path)
+    with open(svc_path) as f:
+        content = f.read()
+    assert "LFM3_ENV=production" in content
+    assert "LFM3_LOG_FORMAT=json" in content
+    assert "LFM3_RATE_LIMIT_RPM" in content
+    assert "LFM3_API_KEYS" in content
+    print("  ✓ CPU service documents enterprise env vars")
+
+
+def test_batched_server_has_live_ready():
+    """Test that batched CPU server exposes /live and /ready probes."""
+    import os
+    path = os.path.join(SERVER_DIR, "lib", "lfm3_npu", "batched_server.py")
+    assert os.path.exists(path)
+    with open(path) as f:
+        content = f.read()
+    assert "@app.get(\"/live\")" in content, "Should have /live probe"
+    assert "@app.get(\"/ready\")" in content, "Should have /ready probe"
+    assert "check_rate_limit" in content, "Should have rate-limit dependency"
+    assert "_circuit_breaker" in content, "Should have circuit breaker"
+    print("  ✓ Batched server has /live, /ready, rate limit, circuit breaker")
+
+
+def test_npu_server_has_live_ready():
+    """Test that NPU server exposes /live and /ready probes."""
+    import os
+    path = os.path.join(SERVER_DIR, "lib", "lfm3_npu", "npu_server.py")
+    assert os.path.exists(path)
+    with open(path) as f:
+        content = f.read()
+    assert "@app.get(\"/live\")" in content, "Should have /live probe"
+    assert "@app.get(\"/ready\")" in content, "Should have /ready probe"
+    assert "_circuit_breaker" in content, "Should have circuit breaker"
+    print("  ✓ NPU server has /live, /ready, circuit breaker")
+
+
+def test_otel_collector_jaeger_path():
+    """Test that OTel collector exports to Jaeger's OTLP HTTP path."""
+    import os
+    path = os.path.join(SERVER_DIR, "docker", "otel-collector-config.yaml")
+    assert os.path.exists(path)
+    with open(path) as f:
+        content = f.read()
+    assert "endpoint: jaeger:4318/api/otlp" in content, (
+        "OTel exporter endpoint must include /api/otlp prefix so the "
+        "appended /v1/traces yields /api/otlp/v1/traces (Jaeger's path)"
+    )
+    print("  ✓ OTel collector -> Jaeger path is correct")
+
+
+
+
 def test_startup_validate_service_exists():
     """Test that startup validate systemd service exists."""
     import os
@@ -306,6 +524,16 @@ def main():
         test_quality_monitor_writes_state,
         test_startup_validate_service_exists,
         test_quality_monitor_has_unresponsive_detection,
+        test_enterprise_module_imports,
+        test_api_key_auth,
+        test_rate_limiter,
+        test_circuit_breaker,
+        test_structured_logging,
+        test_config_has_enterprise_defaults,
+        test_cpu_service_has_enterprise_env,
+        test_batched_server_has_live_ready,
+        test_npu_server_has_live_ready,
+        test_otel_collector_jaeger_path,
     ]
 
     passed = 0

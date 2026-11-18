@@ -57,6 +57,18 @@ DEFAULTS: Dict[str, Any] = {
         "level": "INFO",
         "log_dir": "/media/scott/data/lfm3-npu-tool/var/log",
     },
+    "security": {
+        "api_keys": "",
+        "auth_enabled": False,
+    },
+    "rate_limit": {
+        "requests_per_minute": 60,
+        "burst": 10,
+    },
+    "circuit_breaker": {
+        "failure_threshold": 5,
+        "recovery_timeout_seconds": 30,
+    },
     "performance": {
         "ort_session": {
             "intra_op_num_threads": 0,

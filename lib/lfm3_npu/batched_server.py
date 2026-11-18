@@ -37,6 +37,7 @@ from lfm3_npu.batch_inference import (
     _sample_token,
     EOS_TOKEN_ID,
 )
+from lfm3_npu.enterprise import RateLimiter, CircuitBreaker, CircuitOpenError, log_event
 
 
 # ====================================================================== #
@@ -69,6 +70,16 @@ SERVER_PORT = int(os.environ.get("LFM3_PORT", "1238"))
 
 # API key for authentication (optional - if set, all endpoints require X-API-Key header)
 API_KEY = os.environ.get("LFM3_API_KEY", "")
+
+# Enterprise: rate limiting + circuit breaker
+_rate_limiter = RateLimiter()
+_circuit_breaker = CircuitBreaker(
+    failure_threshold=config.get("circuit_breaker.failure_threshold", 5),
+    recovery_timeout=config.get("circuit_breaker.recovery_timeout_seconds", 30.0),
+)
+
+print(f"{SERVER_NAME}: Rate limiting {_rate_limiter.rate:.2f} req/s (burst {_rate_limiter.capacity})", flush=True)
+print(f"{SERVER_NAME}: Circuit breaker threshold={_circuit_breaker.failure_threshold}, recovery={_circuit_breaker.recovery_timeout}s", flush=True)
 
 # Structured JSON logging (set LFM3_LOG_FORMAT=json)
 LOG_FORMAT_JSON = os.environ.get("LFM3_LOG_FORMAT", "").lower() == "json"
@@ -543,6 +554,21 @@ async def verify_api_key(request: Request):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+async def check_rate_limit(request: Request):
+    """Token-bucket rate limit dependency.
+
+    Limits per API key when LFM3_API_KEY is configured, otherwise per client IP.
+    """
+    # label=None => RateLimiter buckets by client IP; label=API_KEY => per key
+    retry_after = _rate_limiter.allow(request, API_KEY if API_KEY else None)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded; retry after {retry_after:.1f}s",
+            headers={"Retry-After": f"{retry_after:.1f}"},
+        )
+
+
 # ====================================================================== #
 # Endpoints
 # ====================================================================== #
@@ -561,6 +587,29 @@ async def health():
         "free_slots": batcher_metrics.get("free_slots", 0),
         "avg_decode_ms": batcher_metrics.get("avg_decode_ms", 0),
         "port": SERVER_PORT,
+    }
+
+
+@app.get("/live")
+async def liveness():
+    """Kubernetes-style liveness probe: the process is alive."""
+    return {"status": "alive", "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}", "port": SERVER_PORT}
+
+
+@app.get("/ready")
+async def readiness():
+    """Kubernetes-style readiness probe: the model/batcher is loaded and serving."""
+    if batcher is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    batcher_metrics = batcher.get_metrics() if batcher else {}
+    return {
+        "status": "ready",
+        "provider": PROVIDER,
+        "model": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "port": SERVER_PORT,
+        "max_batch_size": batcher.max_batch_size,
+        "active_slots": batcher_metrics.get("active_slots", 0),
+        "free_slots": batcher_metrics.get("free_slots", 0),
     }
 
 
@@ -755,12 +804,17 @@ async def fleet_status():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-    request: Request, req: ChatCompletionRequest, _=Depends(verify_api_key)
+    request: Request, req: ChatCompletionRequest,
+    _=Depends(verify_api_key), __=Depends(check_rate_limit)
 ):
     if batcher is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     tracer = get_tracer()
+
+    client_ip = request.client.host if request.client else "unknown"
+    request_id = request.headers.get("X-Request-ID") or f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    start_time = time.perf_counter()
 
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
@@ -792,18 +846,39 @@ async def chat_completions(
 
         generated_text = ""
         finish_reason = "stop"
-        error_type = None
-        while True:
-            try:
-                result = await asyncio.wait_for(result_queue.get(), timeout=120.0)
-            except asyncio.TimeoutError:
-                error_type = "timeout"
-                raise HTTPException(status_code=504, detail="Generation timeout")
+        http_error = None
+        try:
+            with _circuit_breaker.call("cpu_inference"):
+                while True:
+                    try:
+                        result = await asyncio.wait_for(result_queue.get(), timeout=120.0)
+                    except asyncio.TimeoutError:
+                        http_error = HTTPException(status_code=504, detail="Generation timeout")
+                        break
 
-            generated_text += result.get("token", "")
-            if result.get("finished"):
-                finish_reason = result.get("finish_reason", "stop")
-                break
+                    generated_text += result.get("token", "")
+                    if result.get("finished"):
+                        finish_reason = result.get("finish_reason", "stop")
+                        break
+        except CircuitOpenError as e:
+            log_event(
+                "inference.circuit_open",
+                request_id=request_id,
+                client_ip=client_ip,
+                endpoint="/v1/chat/completions",
+                method="POST",
+                status_code=503,
+                provider=PROVIDER,
+                model=f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+                event="circuit_open",
+            )
+            metrics.record_error("chat/completions")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Inference circuit open; retry after {e.retry_after:.1f}s",
+            )
+        if http_error is not None:
+            raise http_error
 
         duration_ms = (time.perf_counter() - start_time) * 1000
 
@@ -864,7 +939,8 @@ async def chat_completions(
 
 @app.post("/v1/batch/chat/completions")
 async def batch_chat_completions(
-    reqs: List[ChatCompletionRequest], _=Depends(verify_api_key)
+    reqs: List[ChatCompletionRequest],
+    _=Depends(verify_api_key), __=Depends(check_rate_limit)
 ):
     """Batch multiple chat completion requests in a single HTTP call.
 

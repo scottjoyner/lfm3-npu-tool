@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 import onnxruntime_genai as og  # Register RyzenAI NPU provider before onnxruntime
 import onnxruntime as ort
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel
 from tokenizers import Tokenizer
@@ -28,6 +28,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfm3_npu.config import load_config
 from lfm3_npu.metrics import MetricsCollector
+from lfm3_npu.enterprise import (
+    APIKeyAuth,
+    CircuitBreaker,
+    CircuitOpenError,
+    EnterpriseMiddleware,
+    RateLimiter,
+    log_event,
+    require_api_key,
+)
 
 
 def _load_layer_types(model_path: str) -> Tuple[List[int], List[int], int, int]:
@@ -132,6 +141,20 @@ CONV_LAYERS: List[int] = []
 ATTN_LAYERS: List[int] = []
 HIDDEN = 2048
 CONV_L_CACHE = 7
+
+# Enterprise: authentication, rate limiting, circuit breaker
+_enterprise_auth = APIKeyAuth()
+_rate_limiter = RateLimiter()
+_circuit_breaker = CircuitBreaker(
+    failure_threshold=config.get("server.npu.circuit_breaker.failure_threshold", 5),
+    recovery_timeout=config.get("server.npu.circuit_breaker.recovery_timeout", 30.0),
+)
+
+_enterprise_auth_enabled = _enterprise_auth.enabled
+if _enterprise_auth_enabled:
+    print(f"NPU Server: API key authentication enabled ({len(_enterprise_auth._keys)} key(s))", flush=True)
+print(f"NPU Server: Rate limiting {_rate_limiter.rate:.2f} req/s (burst {_rate_limiter.capacity})", flush=True)
+print(f"NPU Server: Circuit breaker threshold={_circuit_breaker.failure_threshold}, recovery={_circuit_breaker.recovery_timeout}s", flush=True)
 
 NEEDS_PAST_CONV = False
 NEEDS_PAST_KV = False
@@ -252,6 +275,35 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LFM3-1.7B NPU Inference Server", lifespan=lifespan)
+
+# Enterprise middleware: auth + rate limiting + structured access logging
+app.add_middleware(
+    EnterpriseMiddleware,
+    auth=_enterprise_auth,
+    limiter=_rate_limiter,
+    exclude_paths=("/health", "/live", "/ready", "/docs", "/openapi.json", "/v1/models", "/metrics"),
+)
+# Attach auth to app state for dependency-style enforcement
+app.state.enterprise_auth = _enterprise_auth
+
+
+@app.get("/live")
+async def liveness():
+    """Kubernetes-style liveness probe: the process is alive."""
+    return {"status": "alive", "model": "lfm3-1.7b-npu"}
+
+
+@app.get("/ready")
+async def readiness():
+    """Kubernetes-style readiness probe: the model is loaded and serving."""
+    if sess is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    provider = sess.get_providers()[0] if sess.get_providers() else "unknown"
+    return {
+        "status": "ready",
+        "provider": provider,
+        "model": "lfm3-1.7b-npu",
+    }
 
 
 class ChatMessage(BaseModel):
@@ -546,9 +598,16 @@ def _generate_stream(
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(request: Request, req: ChatCompletionRequest):
     if not sess:
         raise HTTPException(status_code=503, detail="Model not loaded")
+
+    # Enterprise: enforce API key authentication (defense-in-depth).
+    require_api_key(request)
+
+    request_id = getattr(request.state, "request_id", None)
+    api_key_hash = getattr(request.state, "api_key_hash", None)
+    client_ip = request.client.host if request.client else "unknown"
 
     prompt = ""
     for msg in req.messages:
@@ -564,14 +623,74 @@ async def chat_completions(req: ChatCompletionRequest):
     temperature = req.temperature or 0.7
     top_p = req.top_p or 1.0
 
+    prompt_tokens = len(tokenizer.encode(prompt).ids) if tokenizer else 0
+
     if req.stream:
         return StreamingResponse(
             _stream_generate_async(prompt, max_tokens, temperature, top_p),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={"X-Request-Id": request_id or ""},
         )
 
-    # Run blocking inference in thread pool to avoid blocking event loop
-    result = await asyncio.to_thread(_generate_text, prompt, max_tokens, temperature, top_p)
+    # Run blocking inference in thread pool, protected by circuit breaker.
+    def _protected_generate():
+        with _circuit_breaker.call("npu_inference"):
+            return _generate_text(prompt, max_tokens, temperature, top_p)
+
+    overall_start = time.perf_counter()
+    try:
+        result = await asyncio.to_thread(_protected_generate)
+    except CircuitOpenError as e:
+        log_event(
+            "inference.circuit_open",
+            request_id=request_id,
+            client_ip=client_ip,
+            api_key_hash=api_key_hash,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=503,
+            event="circuit_open",
+        )
+        metrics.record_error("chat/completions")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Inference circuit open; retry after {e.retry_after:.1f}s",
+        )
+    except Exception as e:
+        latency_ms = (time.perf_counter() - overall_start) * 1000
+        log_event(
+            "inference.error",
+            request_id=request_id,
+            client_ip=client_ip,
+            api_key_hash=api_key_hash,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=500,
+            latency_ms=latency_ms,
+            event="inference_error",
+            extra={"error": str(e)},
+        )
+        metrics.record_error("chat/completions")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+    latency_ms = (time.perf_counter() - overall_start) * 1000
+    completion_tokens = len(tokenizer.encode(result).ids) if tokenizer else 0
+    total_tokens = prompt_tokens + completion_tokens
+    decode_tps = (completion_tokens / (latency_ms / 1000.0)) if latency_ms > 0 else 0.0
+
+    log_event(
+        "inference.completed",
+        request_id=request_id,
+        client_ip=client_ip,
+        api_key_hash=api_key_hash,
+        endpoint="/v1/chat/completions",
+        method="POST",
+        status_code=200,
+        latency_ms=latency_ms,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        decode_tps=decode_tps,
+    )
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
