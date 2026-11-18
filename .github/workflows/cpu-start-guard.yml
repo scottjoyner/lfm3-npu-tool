@@ -1,0 +1,24 @@
+name: CPU manual start guard (offline only)
+on:
+  push:
+    paths:
+      - "start_cpu.sh"
+      - "tests/test_cpu_start_safety.py"
+      - ".github/workflows/cpu-start-guard.yml"
+  pull_request:
+    paths:
+      - "start_cpu.sh"
+      - "tests/test_cpu_start_safety.py"
+      - ".github/workflows/cpu-start-guard.yml"
+permissions:
+  contents: read
+jobs:
+  offline-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell parser check
+        run: bash -n start_cpu.sh
+      - name: Hermetic fake-service tests, no model launch
+        run: python3 -m unittest discover -s tests -p test_cpu_start_safety.py -v
