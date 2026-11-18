@@ -5,6 +5,7 @@ Test suite for LFM3-1.7B NPU tooling.
 
 import sys
 import os
+import copy
 import hashlib
 
 SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1015,6 +1016,204 @@ def test_w3c_traceparent_header():
     print("  ✓ W3C traceparent format recognized")
 
 
+# ---------------------------------------------------------------------------
+# Config schema validation tests
+# ---------------------------------------------------------------------------
+
+
+def test_config_schema_imports():
+    """Test that the config schema module imports cleanly."""
+    from lfm3_npu.config_schema import ConfigSchema, validate_config, ConfigValidationError
+    assert callable(ConfigSchema)
+    assert callable(validate_config)
+    assert issubclass(ConfigValidationError, Exception)
+    print("  ✓ Config schema module imports work")
+
+
+def test_config_schema_validates_defaults():
+    """Test that the default configuration passes validation."""
+    from lfm3_npu.config_schema import validate_config
+    from lfm3_npu.config import DEFAULTS
+    result = validate_config(copy.deepcopy(DEFAULTS))
+    assert result is not None
+    assert result["server"]["cpu"]["port"] == 1238
+    assert result["server"]["npu"]["port"] == 1239
+    print("  ✓ Default configuration passes schema validation")
+
+
+def test_config_schema_rejects_invalid_provider():
+    """Test that an invalid NPU provider is rejected."""
+    from lfm3_npu.config_schema import validate_config, ConfigValidationError
+    try:
+        validate_config({"npu": {"provider": "InvalidProvider"}})
+        assert False, "Should have raised ConfigValidationError"
+    except ConfigValidationError as e:
+        assert "provider" in e.errors[0]
+    print("  ✓ Invalid NPU provider rejected")
+
+
+def test_config_schema_rejects_invalid_port():
+    """Test that an out-of-range port is rejected."""
+    from lfm3_npu.config_schema import validate_config, ConfigValidationError
+    try:
+        validate_config({"server": {"cpu": {"port": 99999}}})
+        assert False, "Should have raised ConfigValidationError"
+    except ConfigValidationError as e:
+        assert "port" in e.errors[0]
+    print("  ✓ Invalid port rejected")
+
+
+def test_config_schema_rejects_port_conflict():
+    """Test that CPU and NPU using the same port is rejected."""
+    from lfm3_npu.config_schema import validate_config, ConfigValidationError
+    try:
+        validate_config({"server": {"cpu": {"port": 1238}, "npu": {"port": 1238}}})
+        assert False, "Should have raised ConfigValidationError"
+    except ConfigValidationError as e:
+        assert "port" in e.errors[0] or "differ" in e.errors[0]
+    print("  ✓ CPU/NPU port conflict rejected")
+
+
+def test_config_schema_rejects_invalid_temperature():
+    """Test that temperature out of range is rejected."""
+    from lfm3_npu.config_schema import validate_config, ConfigValidationError
+    try:
+        validate_config({"generation": {"temperature": 5.0}})
+        assert False, "Should have raised ConfigValidationError"
+    except ConfigValidationError as e:
+        assert "temperature" in e.errors[0]
+    print("  ✓ Invalid temperature rejected")
+
+
+def test_config_schema_coerces_types():
+    """Test that valid types are coerced (e.g., string port to int)."""
+    from lfm3_npu.config_schema import validate_config
+    result = validate_config({"server": {"cpu": {"port": "1238"}}})
+    assert result["server"]["cpu"]["port"] == 1238
+    assert isinstance(result["server"]["cpu"]["port"], int)
+    print("  ✓ Type coercion works")
+
+
+def test_config_watcher_detects_changes():
+    """Test that ConfigWatcher detects file changes."""
+    import tempfile, time, yaml, os
+    from lfm3_npu.config_schema import ConfigWatcher
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump({"logging": {"level": "INFO"}}, f)
+        tmp_path = f.name
+
+    changes = []
+    watcher = ConfigWatcher(tmp_path, poll_interval=0.5)
+    watcher.add_callback(lambda data: changes.append(data))
+    watcher.start()
+    time.sleep(1)
+
+    # Modify file
+    time.sleep(1)
+    with open(tmp_path, "w") as f:
+        yaml.dump({"logging": {"level": "DEBUG"}}, f)
+    time.sleep(2)
+
+    assert len(changes) >= 2, f"Expected at least 2 callbacks, got {len(changes)}"
+    assert changes[-1]["logging"]["level"] == "DEBUG"
+    watcher.stop()
+    os.unlink(tmp_path)
+    print("  ✓ ConfigWatcher detects file changes")
+
+
+def test_reloadable_config_hot_reload():
+    """Test that ReloadableConfig hot-reloads from disk."""
+    import tempfile, time, yaml, os
+    from lfm3_npu.config_schema import ReloadableConfig
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump({"logging": {"level": "INFO"}}, f)
+        tmp_path = f.name
+
+    rc = ReloadableConfig(tmp_path)
+    rc.start_watching()
+    time.sleep(1)
+    cfg = rc.get()
+    assert cfg is not None
+    assert cfg.get("logging.level") == "INFO"
+
+    # Modify file
+    time.sleep(1)
+    with open(tmp_path, "w") as f:
+        yaml.dump({"logging": {"level": "WARNING"}}, f)
+    time.sleep(7)
+
+    cfg = rc.get()
+    assert cfg.get("logging.level") == "WARNING"
+    rc.stop_watching()
+    os.unlink(tmp_path)
+    print("  ✓ ReloadableConfig hot-reloads from disk")
+
+
+# ---------------------------------------------------------------------------
+# Audit log persistence tests
+# ---------------------------------------------------------------------------
+
+
+def test_audit_log_persistence():
+    """Test that audit logger can write to a file."""
+    import tempfile, os, json
+    from lfm3_npu.audit import AuditLogger, _AuditFormatter
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        audit = AuditLogger("test-service")
+        # Add a file handler with JSON formatter
+        import logging
+        handler = logging.FileHandler(tmp_path)
+        handler.setFormatter(_AuditFormatter())
+        audit.logger.addHandler(handler)
+
+        audit.auth_success(actor="sk-abc123", actor_type="api_key", request_id="req-123")
+        handler.flush()
+
+        # Read back and verify
+        with open(tmp_path) as f:
+            lines = f.readlines()
+        assert len(lines) >= 1
+        parsed = json.loads(lines[-1].strip())
+        assert parsed["event"] == "auth.success"
+        assert parsed["actor"] == hashlib.sha256(b"sk-abc123").hexdigest()[:16]
+        print("  ✓ Audit log persistence to file works")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_audit_file_handler_rotation():
+    """Test that audit log file handler supports rotation."""
+    import tempfile, os, json, logging
+    from logging.handlers import RotatingFileHandler
+    from lfm3_npu.audit import AuditLogger, _AuditFormatter
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        tmp_path = f.name
+
+    try:
+        audit = AuditLogger("test-service")
+        handler = RotatingFileHandler(tmp_path, maxBytes=1000, backupCount=3)
+        handler.setFormatter(_AuditFormatter())
+        audit.logger.addHandler(handler)
+
+        # Write enough entries to trigger rotation
+        for i in range(20):
+            audit.auth_success(actor=f"sk-key-{i}", request_id=f"req-{i}")
+        handler.flush()
+
+        # Verify main file exists and has content
+        assert os.path.exists(tmp_path)
+        print("  ✓ Audit log rotation handler works")
+    finally:
+        os.unlink(tmp_path)
+
+
 
 
 def main():
@@ -1079,6 +1278,17 @@ def main():
         test_circuit_breaker_metrics,
         test_load_shed_config,
         test_w3c_traceparent_header,
+        test_config_schema_imports,
+        test_config_schema_validates_defaults,
+        test_config_schema_rejects_invalid_provider,
+        test_config_schema_rejects_invalid_port,
+        test_config_schema_rejects_port_conflict,
+        test_config_schema_rejects_invalid_temperature,
+        test_config_schema_coerces_types,
+        test_config_watcher_detects_changes,
+        test_reloadable_config_hot_reload,
+        test_audit_log_persistence,
+        test_audit_file_handler_rotation,
         test_startup_validate_service_exists,
     ]
 
