@@ -5,8 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Do not compete with an already-bound CPU port (including cron-owned servers).
+# Exit 1 from ExecCondition skips startup without a retry storm.
+ExecCondition=/usr/bin/python3 -B /media/scott/data/lfm3-npu-tool/scripts/cpu_port_guard.py
 ExecStart=/media/scott/data/ryzen-ai-venv/bin/python -B /media/scott/data/lfm3-npu-tool/lib/lfm3_npu/cpu_batched_server.py --host 0.0.0.0 --port 1238
 Restart=always
+# Uvicorn binding failures exit 3; avoid endless competing port-start attempts.
+RestartPreventExitStatus=3
 RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=5
