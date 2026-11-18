@@ -12,7 +12,7 @@ import time
 import uuid
 import json
 import asyncio
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Tuple
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -233,6 +233,7 @@ def _configure_session_options() -> ort.SessionOptions:
 def load_model():
     """Load tokenizer and ONNX model on CPU EP."""
     global tokenizer, sess, metrics, CONV_LAYERS, ATTN_LAYERS, HIDDEN, CONV_L_CACHE
+    global _requests_since_recycle  # Reset shared counter when loading.
 
     tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
 
@@ -253,7 +254,7 @@ def load_model():
 
     metrics = MetricsCollector(provider="CPUExecutionProvider", model="lfm3-1.7b-cpu")
     print(f"CPU Server: Providers: {sess.get_providers()}", flush=True)
-    print(f"CPU Server: Model loaded on CPU EP", flush=True)
+    print("CPU Server: Model loaded on CPU EP", flush=True)
     print(f"CPU Server: Conv layers: {CONV_LAYERS}, Attention layers: {ATTN_LAYERS}", flush=True)
     _requests_since_recycle = 0
 
@@ -820,7 +821,7 @@ async def _stream_generate_async(prompt, max_tokens, temperature, top_p):
         if item == "__END__":
             break
         if item == "__DONE__":
-            yield f"data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
             break
         yield f"data: {item}\n\n"
 
