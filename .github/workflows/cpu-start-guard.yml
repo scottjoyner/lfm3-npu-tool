@@ -3,11 +3,15 @@ on:
   push:
     paths:
       - "start_cpu.sh"
+      - "scripts/cpu_port_guard.py"
+      - "etc/lfm3-npu-cpu.service"
       - "tests/test_cpu_start_safety.py"
       - ".github/workflows/cpu-start-guard.yml"
   pull_request:
     paths:
       - "start_cpu.sh"
+      - "scripts/cpu_port_guard.py"
+      - "etc/lfm3-npu-cpu.service"
       - "tests/test_cpu_start_safety.py"
       - ".github/workflows/cpu-start-guard.yml"
 permissions:
