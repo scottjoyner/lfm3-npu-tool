@@ -5,6 +5,13 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      npu_admitted:
+        description: "Explicit hardware run; requires owner-set NPU_CI_HARDWARE_APPROVED repository variable"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   unit-tests:
@@ -17,12 +24,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pyyaml psutil streamlit
+          python3 -m pip install pytest pyyaml psutil streamlit onnxruntime onnx tokenizers fastapi httpx
 
       - name: Run unit tests
         run: |
@@ -43,7 +50,9 @@ jobs:
       - name: Install linting tools
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install flake8 pyflakes shellcheck
+          python3 -m pip install flake8 pyflakes
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
 
       - name: Lint Python files
         run: |
@@ -100,15 +109,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate Dockerfile syntax
+      - name: Build and verify container image
         run: |
-          docker buildx build --load --target=base -t lfm3-npu-tool:ci . || echo "Full build requires FLM binary - Dockerfile syntax checked"
+          docker buildx build --load -t lfm3-npu-tool:ci .
+          docker image inspect lfm3-npu-tool:ci --format '{{.Id}}'
 
-  # CI-only integration tests (CPU-only, runs on GitHub-hosted runners)
+  # Offline synthetic CPU runtime contract; NOT live LFM3 service or model acceptance.
   integration-cpu:
     runs-on: ubuntu-latest
     needs: [unit-tests, lint, config-validation]
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -116,19 +126,22 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install CPU fixture dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pyyaml psutil streamlit
+          python3 -m pip install pytest pyyaml psutil onnxruntime onnx tokenizers numpy
 
-      - name: Run CI test suite (CPU-only)
+      - name: Execute real CPU ONNX Runtime fixture (synthetic, not LFM3 weights)
         run: |
-          python3 scripts/ci_test.py
+          python3 -m pytest tests/test_cpu_runtime_integration.py -q
 
   # NPU integration tests (requires NPU hardware - self-hosted runner)
   integration-npu:
+    # Never auto-enqueue on PR/push; hardware lane needs explicit opt-in
+    # AND separately provisioned, approved runner admission.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.npu_admitted == true && vars.NPU_CI_HARDWARE_APPROVED == 'true' }}
     runs-on: [self-hosted, npu]
     needs: [integration-cpu]
     timeout-minutes: 30

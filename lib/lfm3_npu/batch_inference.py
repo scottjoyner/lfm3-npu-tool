@@ -22,7 +22,6 @@ Optimizations:
 """
 
 import asyncio
-import json
 import os
 import time
 from collections import OrderedDict

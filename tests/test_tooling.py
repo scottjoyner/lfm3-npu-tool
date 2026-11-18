@@ -53,13 +53,21 @@ def test_benchmark():
     print("  ✓ Benchmark module works")
 
 
-def test_server_manager():
-    """Test that ServerManager can be instantiated."""
+def test_server_manager(tmp_path, monkeypatch):
+    """Test ServerManager creation without writing to host-specific paths."""
     from lfm3_npu import ServerManager, load_config
+    from lfm3_npu import server as server_module
+
+    pid_dir = tmp_path / "run"
+    log_dir = tmp_path / "log"
+    monkeypatch.setattr(server_module, "PID_DIR", pid_dir)
+    monkeypatch.setattr(server_module, "LOG_DIR", log_dir)
 
     config = load_config()
     manager = ServerManager(config)
     assert manager is not None
+    assert pid_dir.is_dir()
+    assert log_dir.is_dir()
     print("  ✓ ServerManager instantiation works")
 
 

@@ -22,7 +22,6 @@ To enable tracing on the CPU server:
 """
 
 import argparse
-import os
 import subprocess
 import sys
 

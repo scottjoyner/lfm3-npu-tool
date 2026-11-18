@@ -30,10 +30,6 @@ def quantize_kv_cache(model_path: str, output_path: str):
     model = onnx.load(model_path)
     graph = model.graph
 
-    # Build name -> ValueInfoProto maps for graph inputs/outputs
-    input_map = {inp.name: inp for inp in graph.input}
-    output_map = {out.name: out for out in graph.output}
-
     # Collect past_key_values graph inputs
     past_kv_inputs = {}  # (layer_idx, "key"|"value") -> ValueInfoProto
     for inp in graph.input:

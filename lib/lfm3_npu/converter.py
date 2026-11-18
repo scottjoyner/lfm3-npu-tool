@@ -6,7 +6,7 @@ avoiding the libvaiml.so::vaiml_get_capability_v5 crash.
 """
 
 import onnx
-from onnx import helper, TensorProto, numpy_helper
+from onnx import helper, numpy_helper
 import numpy as np
 
 from .replace_conv_im2col import convert_conv_im2col

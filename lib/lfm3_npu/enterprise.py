@@ -12,7 +12,6 @@ dropped into any FastAPI-based inference server without new pip packages.
 """
 
 import hashlib
-import hmac
 import json
 import logging
 import sys
@@ -315,7 +314,7 @@ class CircuitBreaker:
                 pass  # allow single trial
         try:
             yield
-        except self.expected_exception as e:
+        except self.expected_exception:
             self._record_failure()
             raise
         else:

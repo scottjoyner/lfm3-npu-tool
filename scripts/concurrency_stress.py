@@ -152,7 +152,7 @@ def run_stress(server, concurrency, total_requests):
         total_times = [r["total_time"] for r in successful]
         garbled_count = sum(1 for r in successful if r["has_garbled"])
 
-        print(f"\nResults:")
+        print("\nResults:")
         print(f"  Successful:  {len(successful)}/{total_requests}")
         print(f"  Failed:      {len(failed)}/{total_requests}")
         print(f"  Total time:  {total_elapsed:.1f}s")
@@ -167,7 +167,7 @@ def run_stress(server, concurrency, total_requests):
                   f"max={max(total_times):.2f}s")
         print(f"  Garbled:     {garbled_count}/{len(successful)} requests")
         if decodes:
-            print(f"  Vocab div:   N/A (per-request)")
+            print("  Vocab div:   N/A (per-request)")
 
     else:
         print(f"\nAll {total_requests} requests failed.")
