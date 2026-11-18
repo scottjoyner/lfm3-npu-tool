@@ -5,8 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Refuse to compete with an independently owned CPU port.
+ExecCondition=/usr/bin/python3 -B /media/scott/data/lfm3-npu-tool/scripts/cpu_port_guard.py
 ExecStart=/media/scott/data/ryzen-ai-venv/bin/python -B /media/scott/data/lfm3-npu-tool/lib/lfm3_npu/cpu_batched_server.py --host 0.0.0.0 --port 1238
 Restart=always
+# Uvicorn bind-failure exit code: do not crash-loop against healthy holder.
+RestartPreventExitStatus=3
 RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=5
