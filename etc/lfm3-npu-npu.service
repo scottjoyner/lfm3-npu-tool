@@ -34,6 +34,13 @@ Environment=LFM3_ENV=production
 # Environment=LFM3_MAX_MESSAGES=20
 # Environment=LFM3_DENY_LIST=10.0.0.1
 # Environment=LFM3_ALLOW_LIST=
+# Enterprise: security headers
+# Environment=LFM3_SECURITY_HSTS_MAX_AGE=31536000
+# Environment=LFM3_SECURITY_DISABLE_HSTS=0
+# Enterprise: audit logging
+# Environment=LFM3_AUDIT_SERVICE_NAME=lfm3-inference
+# Enterprise: load shedding
+# Environment=LFM3_LOAD_SHED_MAX_ACTIVE=100
 
 [Install]
 WantedBy=default.target

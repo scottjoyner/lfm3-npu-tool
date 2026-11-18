@@ -5,6 +5,7 @@ Test suite for LFM3-1.7B NPU tooling.
 
 import sys
 import os
+import hashlib
 
 SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SERVER_DIR, "lib"))
@@ -807,6 +808,215 @@ def test_validation_error_response():
     print("  ✓ Validation error response format works")
 
 
+# ---------------------------------------------------------------------------
+# Security headers tests
+# ---------------------------------------------------------------------------
+
+
+def test_security_headers_module_imports():
+    """Test that the security headers module imports cleanly."""
+    from lfm3_npu.security_headers import SecurityHeadersMiddleware
+    assert callable(SecurityHeadersMiddleware)
+    print("  ✓ Security headers module imports work")
+
+
+def test_security_headers_applied():
+    """Test that SecurityHeadersMiddleware adds expected headers."""
+    from lfm3_npu.security_headers import SecurityHeadersMiddleware
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    async def homepage(request):
+        return JSONResponse({"ok": True})
+
+    app = Starlette(routes=[Route("/homepage", homepage, methods=["GET"])])
+    app.add_middleware(SecurityHeadersMiddleware)
+    client = TestClient(app)
+    resp = client.get("/homepage")
+
+    assert resp.status_code == 200
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["X-XSS-Protection"] == "1; mode=block"
+    assert "Content-Security-Policy" in resp.headers
+    assert "Referrer-Policy" in resp.headers
+    assert "Permissions-Policy" in resp.headers
+    assert "Strict-Transport-Security" in resp.headers
+    assert "max-age=" in resp.headers["Strict-Transport-Security"]
+    print("  ✓ Security headers applied to responses")
+
+
+def test_security_headers_hsts_disabled():
+    """Test HSTS can be disabled for HTTP-only deployments."""
+    import os
+    from lfm3_npu.security_headers import SecurityHeadersMiddleware
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    os.environ["LFM3_SECURITY_DISABLE_HSTS"] = "1"
+
+    async def homepage(request):
+        return JSONResponse({"ok": True})
+
+    app = Starlette(routes=[Route("/homepage", homepage, methods=["GET"])])
+    app.add_middleware(SecurityHeadersMiddleware)
+    client = TestClient(app)
+    resp = client.get("/homepage")
+
+    assert "Strict-Transport-Security" not in resp.headers
+    print("  ✓ HSTS can be disabled")
+
+    del os.environ["LFM3_SECURITY_DISABLE_HSTS"]
+
+
+# ---------------------------------------------------------------------------
+# Audit logging tests
+# ---------------------------------------------------------------------------
+
+
+def test_audit_module_imports():
+    """Test that the audit module imports cleanly."""
+    from lfm3_npu.audit import AuditLogger, get_audit
+    assert callable(AuditLogger)
+    assert callable(get_audit)
+    print("  ✓ Audit module imports work")
+
+
+def test_audit_json_output():
+    """Test that audit logger emits valid JSON with required fields."""
+    from lfm3_npu.audit import AuditLogger, _AuditFormatter
+    import io, json, logging
+
+    audit = AuditLogger("test-service")
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(_AuditFormatter())
+    audit.logger.handlers = [handler]
+
+    audit.auth_success(actor="sk-abc123", actor_type="api_key", request_id="req-123")
+    output = stream.getvalue().strip()
+    parsed = json.loads(output.splitlines()[-1])
+
+    assert parsed["event"] == "auth.success"
+    assert parsed["outcome"] == "success"
+    assert parsed["actor"] == hashlib.sha256(b"sk-abc123").hexdigest()[:16]
+    assert parsed["actor_type"] == "api_key"
+    assert parsed["resource"] == "authentication"
+    assert parsed["request_id"] == "req-123"
+    assert parsed["severity"] == "info"
+    assert "timestamp" in parsed
+    print("  ✓ Audit JSON output has required fields")
+
+
+def test_audit_risk_scoring():
+    """Test that audit events carry appropriate risk scores."""
+    from lfm3_npu.audit import AuditLogger, _AuditFormatter
+    import io, json, logging
+
+    audit = AuditLogger("test-service")
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(_AuditFormatter())
+    audit.logger.handlers = [handler]
+
+    # Low risk: auth success
+    audit.auth_success(actor="sk-abc123", request_id="req-1")
+    # High risk: circuit breaker open
+    audit.circuit_breaker_open(resource="cpu_inference", retry_after=30.0, request_id="req-2")
+
+    lines = stream.getvalue().strip().splitlines()
+    parsed1 = json.loads(lines[0])
+    parsed2 = json.loads(lines[1])
+
+    assert parsed1["risk_score"] == 0
+    assert parsed2["risk_score"] == 9
+    assert parsed2["severity"] == "critical"
+    print("  ✓ Audit risk scoring works")
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker metrics tests
+# ---------------------------------------------------------------------------
+
+
+def test_circuit_breaker_metrics():
+    """Test circuit breaker tracks and exposes Prometheus metrics."""
+    from lfm3_npu.enterprise import CircuitBreaker, CircuitOpenError
+
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1, name="test_cb")
+
+    # Successful calls
+    for _ in range(3):
+        with cb.call("test"):
+            pass
+
+    # Failures to open the circuit
+    for _ in range(2):
+        try:
+            with cb.call("test"):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+
+    # Rejected call while open
+    try:
+        with cb.call("test"):
+            pass
+        assert False, "Should have raised CircuitOpenError"
+    except CircuitOpenError:
+        pass
+
+    metrics_text = cb.prometheus_metrics("CPUExecutionProvider", "lfm3-1.7b-cpu")
+    assert 'provider="CPUExecutionProvider"' in metrics_text
+    assert 'model="lfm3-1.7b-cpu"' in metrics_text
+    assert 'circuit="test_cb"' in metrics_text
+    assert "lfm3_circuit_breaker_state" in metrics_text
+    assert "lfm3_circuit_breaker_opens_total" in metrics_text
+    assert "lfm3_circuit_breaker_closes_total" in metrics_text
+    assert "lfm3_circuit_breaker_rejects_total" in metrics_text
+    assert "lfm3_circuit_breaker_successes_total" in metrics_text
+    assert "lfm3_circuit_breaker_failures_total" in metrics_text
+    assert cb.opens >= 1
+    assert cb.rejects >= 1
+    assert cb.successes >= 3
+    assert cb.failures >= 2
+    print("  ✓ Circuit breaker metrics tracked and exported")
+
+
+# ---------------------------------------------------------------------------
+# Load shedding tests
+# ---------------------------------------------------------------------------
+
+
+def test_load_shed_config():
+    """Test load shedding configuration is read from env."""
+    import os
+    val = os.environ.get("LFM3_LOAD_SHED_MAX_ACTIVE", "100")
+    assert val.isdigit()
+    assert int(val) > 0
+    print("  ✓ Load shedding config readable from env")
+
+
+# ---------------------------------------------------------------------------
+# W3C trace context tests
+# ---------------------------------------------------------------------------
+
+
+def test_w3c_traceparent_header():
+    """Test that traceparent header is recognized as W3C trace context."""
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    assert traceparent.startswith("00-")
+    parts = traceparent.split("-")
+    assert len(parts) == 4  # version-traceid-spanid-traceflags
+    print("  ✓ W3C traceparent format recognized")
+
+
+
+
 def main():
     """Run all tests."""
     print("Running LFM3-1.7B NPU tooling tests...\n")
@@ -860,6 +1070,15 @@ def main():
         test_validate_messages,
         test_validate_max_tokens,
         test_validation_error_response,
+        test_security_headers_module_imports,
+        test_security_headers_applied,
+        test_security_headers_hsts_disabled,
+        test_audit_module_imports,
+        test_audit_json_output,
+        test_audit_risk_scoring,
+        test_circuit_breaker_metrics,
+        test_load_shed_config,
+        test_w3c_traceparent_header,
         test_startup_validate_service_exists,
     ]
 

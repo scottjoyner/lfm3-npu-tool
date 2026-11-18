@@ -722,7 +722,6 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
             status_code=503,
             provider="CPUExecutionProvider",
             model="lfm3-1.7b-cpu",
-            event="circuit_open",
         )
         metrics.record_error("chat/completions")
         raise HTTPException(
@@ -742,7 +741,6 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
             latency_ms=latency_ms,
             provider="CPUExecutionProvider",
             model="lfm3-1.7b-cpu",
-            event="inference_error",
             extra={"error": str(e)},
         )
         metrics.record_error("chat/completions")

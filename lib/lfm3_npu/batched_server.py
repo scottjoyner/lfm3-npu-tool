@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 from fastapi import Depends
 from pydantic import BaseModel
 from tokenizers import Tokenizer
@@ -39,7 +39,7 @@ from lfm3_npu.batch_inference import (
     _sample_token,
     EOS_TOKEN_ID,
 )
-from lfm3_npu.enterprise import RateLimiter, CircuitBreaker, CircuitOpenError, log_event
+from lfm3_npu.enterprise import RateLimiter, CircuitBreaker, CircuitOpenError, log_event, register_circuit_breaker, circuit_breaker_prometheus_metrics
 from lfm3_npu.tls import (tls_ready, ssl_context, https_url, tls_status,
                           generate_dev_certificates, TLS_CERT_FILE, TLS_KEY_FILE,
                           TLS_CA_FILE, TLS_VERIFY_CLIENT)
@@ -48,6 +48,8 @@ from lfm3_npu.validation import (
     validate_client, validate_messages, validate_max_tokens,
     ValidationError, validation_error_response, is_validation_error,
 )
+from lfm3_npu.security_headers import SecurityHeadersMiddleware
+from lfm3_npu.audit import get_audit
 
 
 # ====================================================================== #
@@ -95,6 +97,15 @@ print(f"{SERVER_NAME}: Circuit breaker threshold={_circuit_breaker.failure_thres
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
 _slo_target_latency_ms = float(os.environ.get("LFM3_SLO_LATENCY_P95_MS", "5000"))
 _slo_tracker = get_tracker(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}")
+
+# Enterprise: audit logger
+_audit = get_audit()
+
+# Enterprise: register circuit breaker for Prometheus export
+register_circuit_breaker(_circuit_breaker, key=f"{PROVIDER}:{SERVER_NAME}-{PROVIDER_LABEL.lower()}")
+
+# Enterprise: load shedding - reject new requests when active slots exceed threshold
+_load_shed_max_active = int(os.environ.get("LFM3_LOAD_SHED_MAX_ACTIVE", "100"))
 
 # Enterprise: graceful shutdown state
 _shutting_down = False
@@ -385,6 +396,18 @@ async def _graceful_shutdown():
 
 
 app = FastAPI(title=f"LFM3-1.7B Batched Inference Server ({PROVIDER})", lifespan=lifespan)
+
+# Enterprise: security headers on every response
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+# Enterprise: ValidationError exception handler -> structured HTTP 400
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    return JSONResponse(
+        status_code=400,
+        content=validation_error_response(exc),
+    )
 
 
 # ====================================================================== #
@@ -732,6 +755,8 @@ async def metrics_endpoint():
         text += f"{k} {v}\n"
     text += "\n# SLO metrics\n"
     text += prometheus_metrics_all()
+    text += "\n# Circuit breaker metrics\n"
+    text += circuit_breaker_prometheus_metrics()
     return PlainTextResponse(content=text, media_type=metrics.get_content_type())
 
 
@@ -900,21 +925,37 @@ async def chat_completions(
     if _shutting_down:
         raise HTTPException(status_code=503, detail="Server is shutting down, try again later")
 
+    # Enterprise: load shedding - reject when overloaded
+    active_count = len(_active) + len(_pending)
+    if active_count >= _load_shed_max_active:
+        _audit.rate_limit_exceeded(
+            actor=getattr(request.state, "api_key_hash", None) or (request.client.host if request.client else "unknown"),
+            actor_type="api_key",
+            request_id=getattr(request.state, "request_id", None),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Server overloaded; try again later",
+            headers={"Retry-After": "5"},
+        )
+
     tracer = get_tracer()
 
     client_ip = request.client.host if request.client else "unknown"
     request_id = request.headers.get("X-Request-ID") or f"chatcmpl-{uuid.uuid4().hex[:12]}"
     start_time = time.perf_counter()
 
+    # Enterprise: W3C trace context propagation - extract incoming traceparent
+    incoming_traceparent = request.headers.get("traceparent")
+
     # Enterprise: input validation
     api_key_label = getattr(request.state, "api_key_label", None)
+    api_key_hash = getattr(request.state, "api_key_hash", None)
     try:
         validate_client(api_key_label or client_ip)
         validate_messages(req.messages)
         validate_max_tokens(req.max_tokens)
     except ValidationError as e:
-        record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
-                       False, (time.perf_counter() - start_time) * 1000, "chat/completions")
         log_event(
             "validation.rejected",
             request_id=request_id,
@@ -922,15 +963,20 @@ async def chat_completions(
             endpoint="/v1/chat/completions",
             method="POST",
             status_code=400,
-            event="validation_error",
             extra={"code": e.code},
         )
-        raise HTTPException(status_code=400, detail=validation_error_response(e))
+        raise HTTPException(status_code=400, detail=f"{e.code}: {e.message}")
+
+    # Enterprise: audit - authentication success
+    if api_key_label:
+        _audit.auth_success(actor=api_key_hash or client_ip, actor_type="api_key", request_id=request_id)
 
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
         "chat/completions", 0, req.max_tokens or 50
     ) as request_span:
+        if incoming_traceparent:
+            request_span.set_attribute("w3c.traceparent", incoming_traceparent)
         endpoint = "chat/completions"
         start_time = time.perf_counter()
 
@@ -958,6 +1004,12 @@ async def chat_completions(
         generated_text = ""
         finish_reason = "stop"
         http_error = None
+        # Enterprise: audit - inference started
+        _audit.inference_started(
+            actor=api_key_hash or client_ip,
+            resource="chat/completions",
+            request_id=request_id,
+        )
         try:
             with _circuit_breaker.call("cpu_inference"):
                 while True:
@@ -974,6 +1026,17 @@ async def chat_completions(
         except CircuitOpenError as e:
             record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
                            False, (time.perf_counter() - start_time) * 1000, "chat/completions")
+            _audit.circuit_breaker_open(
+                resource="cpu_inference",
+                retry_after=e.retry_after,
+                request_id=request_id,
+            )
+            _audit.inference_failed(
+                actor=api_key_hash or client_ip,
+                resource="cpu_inference",
+                error="circuit_open",
+                request_id=request_id,
+            )
             log_event(
                 "inference.circuit_open",
                 request_id=request_id,
@@ -983,7 +1046,6 @@ async def chat_completions(
                 status_code=503,
                 provider=PROVIDER,
                 model=f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
-                event="circuit_open",
             )
             metrics.record_error("chat/completions")
             raise HTTPException(
@@ -1026,6 +1088,14 @@ async def chat_completions(
         # Enterprise: SLO tracking - record successful request
         record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
                        True, duration_ms, "chat/completions")
+
+        # Enterprise: audit - inference completed
+        _audit.inference_completed(
+            actor=api_key_hash or client_ip,
+            resource="chat/completions",
+            request_id=request_id,
+            latency_ms=duration_ms,
+        )
 
         # Log request
         _log("INFO", "chat_completions",
@@ -1234,6 +1304,7 @@ if __name__ == "__main__":
         app,
         host=args.host,
         port=args.port,
+        server_header=False,
         ssl_certfile=TLS_CERT_FILE if ssl_ctx else None,
         ssl_keyfile=TLS_KEY_FILE if ssl_ctx else None,
         ssl_ca_certs=TLS_CA_FILE if (ssl_ctx and TLS_VERIFY_CLIENT) else None,

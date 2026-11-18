@@ -283,12 +283,18 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 30.0,
         expected_exception: type = Exception,
+        name: str = "inference",
     ) -> None:
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.expected_exception = expected_exception
+        self.name = name
         self._state = self.CLOSED
         self._failures = 0
+        self._opens = 0
+        self._closes = 0
+        self._rejects = 0
+        self._successes = 0
         self._opened_at: Optional[float] = None
         self._lock = threading.Lock()
 
@@ -296,6 +302,31 @@ class CircuitBreaker:
     def state(self) -> str:
         with self._lock:
             return self._state
+
+    @property
+    def opens(self) -> int:
+        with self._lock:
+            return self._opens
+
+    @property
+    def closes(self) -> int:
+        with self._lock:
+            return self._closes
+
+    @property
+    def rejects(self) -> int:
+        with self._lock:
+            return self._rejects
+
+    @property
+    def successes(self) -> int:
+        with self._lock:
+            return self._successes
+
+    @property
+    def failures(self) -> int:
+        with self._lock:
+            return self._failures
 
     @contextmanager
     def call(self, name: str = "inference"):
@@ -310,7 +341,8 @@ class CircuitBreaker:
                 if self._opened_at is not None and now - self._opened_at >= self.recovery_timeout:
                     self._state = self.HALF_OPEN
                 else:
-                    raise CircuitOpenError(name, self.recovery_timeout)
+                    self._rejects += 1
+                    raise CircuitOpenError(self.name, self.recovery_timeout)
             elif self._state == self.HALF_OPEN:
                 pass  # allow single trial
         try:
@@ -327,18 +359,58 @@ class CircuitBreaker:
             if self._state == self.HALF_OPEN or self._failures >= self.failure_threshold:
                 self._state = self.OPEN
                 self._opened_at = time.monotonic()
+                self._opens += 1
 
     def _record_success(self) -> None:
         with self._lock:
             self._state = self.CLOSED
             self._failures = 0
             self._opened_at = None
+            self._closes += 1
+            self._successes += 1
 
     def reset(self) -> None:
         with self._lock:
             self._state = self.CLOSED
             self._failures = 0
+            self._opens = 0
+            self._closes = 0
+            self._rejects = 0
+            self._successes = 0
             self._opened_at = None
+
+    def prometheus_metrics(self, provider: str, model: str) -> str:
+        """Render Prometheus text-format circuit breaker metrics."""
+        with self._lock:
+            state = self._state
+            opens = self._opens
+            closes = self._closes
+            rejects = self._rejects
+            successes = self._successes
+            failures = self._failures
+        labels = f'provider="{provider}",model="{model}",circuit="{self.name}"'
+        state_val = {"closed": 0, "half_open": 1, "open": 2}.get(state, -1)
+        lines = [
+            "# HELP lfm3_circuit_breaker_state Circuit breaker state: 0=closed, 1=half_open, 2=open",
+            "# TYPE lfm3_circuit_breaker_state gauge",
+            f'lfm3_circuit_breaker_state{{{labels}}} {state_val}',
+            "# HELP lfm3_circuit_breaker_opens_total Total circuit openings",
+            "# TYPE lfm3_circuit_breaker_opens_total counter",
+            f'lfm3_circuit_breaker_opens_total{{{labels}}} {opens}',
+            "# HELP lfm3_circuit_breaker_closes_total Total circuit closures",
+            "# TYPE lfm3_circuit_breaker_closes_total counter",
+            f'lfm3_circuit_breaker_closes_total{{{labels}}} {closes}',
+            "# HELP lfm3_circuit_breaker_rejects_total Total requests rejected by open circuit",
+            "# TYPE lfm3_circuit_breaker_rejects_total counter",
+            f'lfm3_circuit_breaker_rejects_total{{{labels}}} {rejects}',
+            "# HELP lfm3_circuit_breaker_successes_total Total successful calls",
+            "# TYPE lfm3_circuit_breaker_successes_total counter",
+            f'lfm3_circuit_breaker_successes_total{{{labels}}} {successes}',
+            "# HELP lfm3_circuit_breaker_failures_total Total failed calls",
+            "# TYPE lfm3_circuit_breaker_failures_total counter",
+            f'lfm3_circuit_breaker_failures_total{{{labels}}} {failures}',
+        ]
+        return "\n".join(lines) + "\n"
 
 
 class CircuitOpenError(Exception):
@@ -487,3 +559,34 @@ def require_api_key(request: Request) -> None:
 
 # Backwards-friendly namespace
 EnterpriseAuth = APIKeyAuth
+
+
+# ---------------------------------------------------------------------------
+# Global circuit breaker registry (for Prometheus export)
+# ---------------------------------------------------------------------------
+
+_circuit_breakers: Dict[str, CircuitBreaker] = {}
+_cb_registry_lock = threading.Lock()
+
+
+def register_circuit_breaker(cb: CircuitBreaker, key: Optional[str] = None) -> str:
+    """Register a circuit breaker for Prometheus metric export.
+
+    Returns the registry key used.
+    """
+    with _cb_registry_lock:
+        if key is None:
+            key = cb.name
+        _circuit_breakers[key] = cb
+        return key
+
+
+def circuit_breaker_prometheus_metrics() -> str:
+    """Render Prometheus metrics for all registered circuit breakers."""
+    with _cb_registry_lock:
+        cbs = list(_circuit_breakers.items())
+    parts = []
+    for key, cb in cbs:
+        parts.append(cb.prometheus_metrics("unknown", "unknown"))
+    return "\n".join(parts)
+

@@ -654,7 +654,6 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
             endpoint="/v1/chat/completions",
             method="POST",
             status_code=503,
-            event="circuit_open",
         )
         metrics.record_error("chat/completions")
         raise HTTPException(
@@ -672,7 +671,6 @@ async def chat_completions(request: Request, req: ChatCompletionRequest):
             method="POST",
             status_code=500,
             latency_ms=latency_ms,
-            event="inference_error",
             extra={"error": str(e)},
         )
         metrics.record_error("chat/completions")

@@ -69,6 +69,19 @@ DEFAULTS: Dict[str, Any] = {
         "failure_threshold": 5,
         "recovery_timeout_seconds": 30,
     },
+    "security_headers": {
+        "hsts_max_age": 31536000,
+        "hsts_include_subdomains": True,
+        "hsts_preload": True,
+        "disable_hsts": False,
+        "referrer_policy": "strict-origin-when-cross-origin",
+    },
+    "audit": {
+        "service_name": "lfm3-inference",
+    },
+    "load_shed": {
+        "max_active_requests": 100,
+    },
     "performance": {
         "ort_session": {
             "intra_op_num_threads": 0,
