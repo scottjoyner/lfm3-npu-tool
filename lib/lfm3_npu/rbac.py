@@ -160,11 +160,15 @@ class RBACAuth:
                            endpoint: str = "") -> None:
         """
         Check that key_info has the given permission.  Raises PermissionError
-        if not authorized.
+        if not authorized.  When authentication is disabled (open access),
+        all requests are allowed.
         """
-        if self.enabled and key_info is None:
+        # When auth is disabled (open access), allow all requests
+        if not self.enabled:
+            return
+        if key_info is None:
             raise PermissionError("Authentication required")
-        if key_info is not None and not key_info.has_permission(permission):
+        if not key_info.has_permission(permission):
             raise PermissionError(
                 f"Insufficient permissions: '{permission}' required for "
                 f"{endpoint or 'this endpoint'} (role: {key_info.role})"
@@ -174,10 +178,14 @@ class RBACAuth:
                      endpoint: str = "") -> None:
         """
         Check that key_info has at least the given role level.
+        When authentication is disabled (open access), all requests are allowed.
         """
-        if self.enabled and key_info is None:
+        # When auth is disabled (open access), allow all requests
+        if not self.enabled:
+            return
+        if key_info is None:
             raise PermissionError("Authentication required")
-        if key_info is not None and role_level(key_info.role) < role_level(min_role):
+        if role_level(key_info.role) < role_level(min_role):
             raise PermissionError(
                 f"Insufficient role: '{min_role}' required for "
                 f"{endpoint or 'this endpoint'} (role: {key_info.role})"

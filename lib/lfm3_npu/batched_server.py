@@ -81,6 +81,19 @@ WARMUP_TOKENS = int(os.environ.get("LFM3_WARMUP_TOKENS", "5"))
 # Server port (for fleet status reporting)
 SERVER_PORT = int(os.environ.get("LFM3_PORT", "1238"))
 
+# Dynamic request batching (from config / env)
+_ENABLE_REQUEST_BATCHING = (
+    os.environ.get("LFM3_ENABLE_REQUEST_BATCHING",
+                   str(config.get("performance.server.enable_request_batching", False))).lower()
+    in ("1", "true", "yes")
+)
+_BATCH_TIMEOUT_MS = float(
+    os.environ.get("LFM3_BATCH_TIMEOUT_MS",
+                   str(config.get("performance.server.batch_timeout_ms", 50)))
+)
+print(f"{SERVER_NAME}: Dynamic request batching: {'enabled' if _ENABLE_REQUEST_BATCHING else 'disabled'} "
+      f"(batch_timeout_ms={_BATCH_TIMEOUT_MS})", flush=True)
+
 # API key for authentication (optional - if set, all endpoints require X-API-Key header)
 API_KEY = os.environ.get("LFM3_API_KEY", "")
 
@@ -570,19 +583,24 @@ async def _batch_loop():
     while not _shutdown_event.is_set():
         try:
             # --- Collect new requests ---
-            # Drain all available requests from the queue for batching
+            # When dynamic batching is enabled, wait up to _BATCH_TIMEOUT_MS for
+            # the first request then drain any already-queued requests to form
+            # a batch. When disabled, process each request immediately one at a
+            # time (minimum latency, no batch accumulation).
             new_items = []
             item = None
             try:
-                item = await asyncio.wait_for(_request_queue.get(), timeout=0.01)
+                collect_timeout = _BATCH_TIMEOUT_MS / 1000.0 if _ENABLE_REQUEST_BATCHING else 0.01
+                item = await asyncio.wait_for(_request_queue.get(), timeout=collect_timeout)
                 new_items.append(item)
-                # Drain any additional requests already in queue
-                while True:
-                    try:
-                        item = _request_queue.get_nowait()
-                        new_items.append(item)
-                    except asyncio.QueueEmpty:
-                        break
+                # Only drain additional queued requests when batching is enabled
+                if _ENABLE_REQUEST_BATCHING:
+                    while True:
+                        try:
+                            item = _request_queue.get_nowait()
+                            new_items.append(item)
+                        except asyncio.QueueEmpty:
+                            break
             except asyncio.TimeoutError:
                 pass
 
@@ -638,7 +656,11 @@ async def _batch_loop():
 
             # --- Prefill new requests (batched) ---
             elif _pending and batcher._free_slots:
+                # When batching is disabled, prefill one request at a time
+                # (minimum latency, no throughput batching).
                 num_slots = len(batcher._free_slots)
+                if not _ENABLE_REQUEST_BATCHING:
+                    num_slots = 1
                 to_prefill = _pending[:num_slots]
                 _pending = _pending[num_slots:]
 
@@ -1203,12 +1225,16 @@ async def _chat_completions_impl(
         raise HTTPException(status_code=500, detail=f"RBAC error: {e}")
 
     # Enterprise: token quota check - reject if per-key quota would be exceeded
+    prompt = _build_prompt(req.messages)
+    max_tokens = req.max_tokens or 50
+    temperature = req.temperature or 0.7
+    top_p = req.top_p or 1.0
     estimated_prompt_tokens = len(tokenizer.encode(prompt).ids) if tokenizer else 0
-    await _check_token_quota(api_key_hash, estimated_prompt_tokens + (req.max_tokens or 50))
+    await _check_token_quota(api_key_hash, estimated_prompt_tokens + max_tokens)
 
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
-        "chat/completions", 0, req.max_tokens or 50
+        "chat/completions", 0, max_tokens
     ) as request_span:
         if incoming_traceparent:
             request_span.set_attribute("w3c.traceparent", incoming_traceparent)
@@ -1218,11 +1244,6 @@ async def _chat_completions_impl(
         # Request ID tracing - use client-provided X-Request-ID or generate one
         client_request_id = request.headers.get(_REQUEST_ID_HEADER)
         req_id = client_request_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
-
-        prompt = _build_prompt(req.messages)
-        max_tokens = req.max_tokens or 50
-        temperature = req.temperature or 0.7
-        top_p = req.top_p or 1.0
 
         request_span.set_attribute("llm.prompt_tokens", len(tokenizer.encode(prompt).ids))
 
