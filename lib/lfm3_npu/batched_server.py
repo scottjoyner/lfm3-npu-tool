@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import onnxruntime as ort
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 from fastapi import Depends
 from pydantic import BaseModel
@@ -174,6 +174,13 @@ _request_metrics: Dict[str, Dict] = {}
 # Per-endpoint metrics tracking
 _endpoint_metrics: Dict[str, Dict[str, Any]] = {}
 
+# Token usage tracking per API key (hash -> {prompt_tokens, completion_tokens, total_tokens, request_count})
+_token_usage: Dict[str, Dict[str, int]] = {}
+_token_usage_lock = asyncio.Lock()
+
+# Per-key token quotas (hash -> max_tokens per period, 0 = unlimited)
+_token_quotas: Dict[str, int] = {}
+
 # Request tracing - correlation ID support
 _REQUEST_ID_HEADER = "X-Request-ID"
 _TRACE_ID_HEADER = "X-Trace-ID"
@@ -267,6 +274,56 @@ def _get_endpoint_metrics() -> Dict[str, Any]:
     return result
 
 
+# --------------------------------------------------------------------------- #
+# Token usage tracking                                                        #
+# --------------------------------------------------------------------------- #
+
+async def _record_token_usage(api_key_hash: Optional[str], prompt_tokens: int,
+                              completion_tokens: int) -> None:
+    """Record token usage per API key hash."""
+    if not api_key_hash:
+        return
+    async with _token_usage_lock:
+        if api_key_hash not in _token_usage:
+            _token_usage[api_key_hash] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "request_count": 0,
+            }
+        usage = _token_usage[api_key_hash]
+        usage["prompt_tokens"] += prompt_tokens
+        usage["completion_tokens"] += completion_tokens
+        usage["total_tokens"] += prompt_tokens + completion_tokens
+        usage["request_count"] += 1
+
+
+async def _check_token_quota(api_key_hash: Optional[str], estimated_tokens: int) -> None:
+    """Enforce per-key token quotas. Raises HTTPException if quota would be exceeded."""
+    if not api_key_hash:
+        return
+    max_tokens = _token_quotas.get(api_key_hash, 0)
+    if max_tokens <= 0:
+        return  # Unlimited
+    async with _token_usage_lock:
+        usage = _token_usage.get(api_key_hash, {})
+        current = usage.get("total_tokens", 0)
+        if current + estimated_tokens > max_tokens:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Token quota exceeded: {current}/{max_tokens} tokens used",
+                headers={"Retry-After": "3600"},
+            )
+
+
+def get_token_usage() -> Dict[str, Any]:
+    """Get a copy of current token usage (hashes truncated for safety)."""
+    result = {}
+    for kh, usage in _token_usage.items():
+        result[kh[:8] + "..."] = dict(usage)
+    return result
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -288,9 +345,55 @@ class ModelInfo(BaseModel):
     owned_by: str = "liquid-ai"
 
 
-# ====================================================================== #
-# Model loading
-# ====================================================================== #
+# --------------------------------------------------------------------------- #
+# OpenAPI response models                                                     #
+# --------------------------------------------------------------------------- #
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: Dict[str, str]
+    finish_reason: str
+
+
+class ChatCompletionUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[ChatCompletionChoice]
+    usage: ChatCompletionUsage
+    request_id: Optional[str] = None
+
+
+class HealthResponse(BaseModel):
+    status: str
+    provider: str
+    model: str
+    uptime_seconds: Optional[float] = None
+    active_slots: int = 0
+    free_slots: int = 0
+    avg_decode_ms: float = 0.0
+    port: int
+    tls: Dict[str, Any] = {}
+
+
+class UsageResponse(BaseModel):
+    server: str
+    provider: str
+    total_keys: int
+    usage: Dict[str, Any]
+
+
+# --------------------------------------------------------------------------- #
+# FastAPI app with OpenAPI tags                                               #
+# --------------------------------------------------------------------------- #
+
 def load_model():
     """Load tokenizer and ONNX model, initialize continuous batcher."""
     global tokenizer, batcher, metrics, CONV_LAYERS, ATTN_LAYERS, HIDDEN, CONV_L_CACHE
@@ -386,6 +489,20 @@ async def lifespan(app: FastAPI):
         await _graceful_shutdown()
 
 
+# FastAPI app with OpenAPI tags (created after lifespan so it can reference it)
+app = FastAPI(
+    title=f"LFM3-1.7B Batched Inference Server ({PROVIDER})",
+    version="1.0.0",
+    lifespan=lifespan,
+    openapi_tags=[
+        {"name": "inference", "description": "Chat completion and batch inference endpoints"},
+        {"name": "health", "description": "Health, liveness, and readiness probes"},
+        {"name": "observability", "description": "Metrics, SLO, traces, and usage"},
+        {"name": "admin", "description": "Administration: shutdown, version, quotas"},
+    ],
+)
+
+
 async def _graceful_shutdown():
     """Drain in-flight requests, then stop the batch loop."""
     global _shutting_down
@@ -404,8 +521,6 @@ async def _graceful_shutdown():
         await asyncio.sleep(0.1)
     print(f"{SERVER_NAME}: Graceful shutdown complete ({len(_active)} active requests drained)", flush=True)
 
-
-app = FastAPI(title=f"LFM3-1.7B Batched Inference Server ({PROVIDER})", lifespan=lifespan)
 
 # Enterprise: security headers on every response
 app.add_middleware(SecurityHeadersMiddleware)
@@ -1087,6 +1202,10 @@ async def _chat_completions_impl(
         )
         raise HTTPException(status_code=500, detail=f"RBAC error: {e}")
 
+    # Enterprise: token quota check - reject if per-key quota would be exceeded
+    estimated_prompt_tokens = len(tokenizer.encode(prompt).ids) if tokenizer else 0
+    await _check_token_quota(api_key_hash, estimated_prompt_tokens + (req.max_tokens or 50))
+
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
         "chat/completions", 0, req.max_tokens or 50
@@ -1204,6 +1323,11 @@ async def _chat_completions_impl(
         # Enterprise: SLO tracking - record successful request
         record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
                        True, duration_ms, "chat/completions")
+
+        # Enterprise: token usage tracking per API key
+        completion_toks = len(tokenizer.encode(generated_text).ids)
+        prompt_toks = len(tokenizer.encode(prompt).ids)
+        await _record_token_usage(api_key_hash, prompt_toks, completion_toks)
 
         # Enterprise: audit - inference completed
         _audit.inference_completed(
@@ -1375,6 +1499,249 @@ async def _stream_results(req_id: str, result_queue: asyncio.Queue, max_tokens: 
     except Exception as e:
         error_chunk = {"error": {"message": str(e), "type": "runtime_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
+
+
+# ====================================================================== #
+# WebSocket streaming endpoint                                           #
+# ====================================================================== #
+
+@app.websocket("/v1/stream/chat/completions")
+async def websocket_chat_completions(websocket: WebSocket):
+    """WebSocket endpoint for real-time token streaming.
+
+    Client sends a JSON chat completion request, receives tokens one at a
+    time as JSON messages, then a final completion message.
+    """
+    await websocket.accept()
+    key_info = getattr(websocket.scope.get("state", {}), "api_key_info", None) if hasattr(websocket.scope.get("state", {}), "api_key_info") else None
+    api_key_hash = None
+    api_key_label = None
+    try:
+        # First message must be the request
+        raw = await websocket.receive_text()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            await websocket.send_json({"error": {"message": "Invalid JSON", "type": "invalid_request_error"}})
+            await websocket.close(code=4000)
+            return
+
+        messages = data.get("messages", [])
+        max_tokens = data.get("max_tokens", 50)
+        temperature = data.get("temperature", 0.7)
+        top_p = data.get("top_p", 1.0)
+        model = data.get("model")
+
+        # Basic validation
+        if not messages:
+            await websocket.send_json({"error": {"message": "messages is required", "type": "invalid_request_error"}})
+            await websocket.close(code=4000)
+            return
+
+        # Build prompt
+        prompt = _build_prompt([ChatMessage(role=m.get("role", "user"), content=m.get("content", "")) for m in messages])
+
+        # Token quota check
+        if tokenizer:
+            estimated = len(tokenizer.encode(prompt).ids) + max_tokens
+            await _check_token_quota(api_key_hash, estimated)
+
+        result_queue = asyncio.Queue()
+        req_id = f"ws-{uuid.uuid4().hex[:12]}"
+        await _request_queue.put((req_id, prompt, temperature, top_p, max_tokens, result_queue))
+
+        tokens_received = 0
+        try:
+            while tokens_received < max_tokens:
+                try:
+                    result = await asyncio.wait_for(result_queue.get(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    await websocket.send_json({"error": {"message": "Generation timeout", "type": "runtime_error"}})
+                    break
+
+                token = result.get("token", "")
+                finished = result.get("finished", False)
+                finish_reason = result.get("finish_reason", "stop")
+
+                if token:
+                    await websocket.send_json({
+                        "id": req_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
+                    })
+                    tokens_received += 1
+
+                if finished:
+                    await websocket.send_json({
+                        "id": req_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                    })
+                    # Record token usage
+                    if tokenizer:
+                        completion_toks = len(tokenizer.encode(token).ids) if token else 0
+                        prompt_toks = len(tokenizer.encode(prompt).ids)
+                        await _record_token_usage(api_key_hash, prompt_toks, completion_toks)
+                    break
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            try:
+                await websocket.send_json({"error": {"message": str(e), "type": "runtime_error"}})
+            except Exception:
+                pass
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+# ====================================================================== #
+# Token usage endpoint                                                   #
+# ====================================================================== #
+
+@app.get("/v1/usage")
+async def usage_report(request: Request, _=Depends(verify_api_key)):
+    """Return token usage statistics (all keys or current key if not admin)."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/usage")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    usage = get_token_usage()
+
+    # If not admin, only return the caller's own usage
+    if key_info and key_info.role != "admin":
+        caller_hash = getattr(request.state, "api_key_hash", None)
+        if caller_hash:
+            usage = {k: v for k, v in usage.items() if k.startswith(caller_hash[:8])}
+
+    return {
+        "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "provider": PROVIDER,
+        "total_keys": len(_token_usage),
+        "usage": usage,
+    }
+
+
+@app.post("/v1/usage/quota")
+async def set_token_quota(request: Request, quota: Dict[str, Any]):
+    """Set a token quota for an API key hash.
+
+    Body: {"key_hash": "abc123...", "max_tokens": 1000000}
+    Set max_tokens to 0 for unlimited.
+    Requires admin role.
+    """
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/usage/quota")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    key_hash = quota.get("key_hash")
+    max_tokens = int(quota.get("max_tokens", 0))
+    if not key_hash:
+        raise HTTPException(status_code=400, detail="key_hash is required")
+    _token_quotas[key_hash] = max_tokens
+    _log("INFO", "token_quota_set", key_hash=key_hash[:8] + "...", max_tokens=max_tokens)
+    return {"status": "ok", "key_hash": key_hash[:8] + "...", "max_tokens": max_tokens}
+
+
+# ====================================================================== #
+# Detailed health endpoint                                               #
+# ====================================================================== #
+
+@app.get("/health/detailed")
+async def health_detailed():
+    """Detailed health check with dependency status (NPU, disk, memory, model)."""
+    checks = {}
+    overall = "healthy"
+
+    # Model / batcher status
+    if batcher is None or tokenizer is None:
+        checks["model"] = {"status": "critical", "message": "Model not loaded"}
+        overall = "critical"
+    else:
+        bm = batcher.get_metrics() if batcher else {}
+        checks["model"] = {
+            "status": "ok",
+            "provider": PROVIDER,
+            "active_slots": bm.get("active_slots", 0),
+            "free_slots": bm.get("free_slots", 0),
+        }
+
+    # Uptime
+    uptime = None
+    if START_TIME is not None:
+        uptime = round(time.time() - START_TIME, 1)
+    checks["uptime"] = {"status": "ok", "uptime_seconds": uptime}
+
+    # Disk usage
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage("/")
+        disk_pct = round(used / total * 100, 1)
+        disk_status = "critical" if disk_pct > 90 else ("warning" if disk_pct > 80 else "ok")
+        if disk_status != "ok":
+            overall = disk_status
+        checks["disk"] = {
+            "status": disk_status,
+            "total_gb": round(total / (1024 ** 3), 2),
+            "used_gb": round(used / (1024 ** 3), 2),
+            "free_gb": round(free / (1024 ** 3), 2),
+            "usage_percent": disk_pct,
+        }
+    except Exception as e:
+        checks["disk"] = {"status": "unknown", "error": str(e)}
+
+    # Memory usage
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        mem_status = "critical" if mem.percent > 90 else ("warning" if mem.percent > 80 else "ok")
+        if mem_status != "ok":
+            overall = mem_status
+        checks["memory"] = {
+            "status": mem_status,
+            "usage_percent": mem.percent,
+            "available_gb": round(mem.available / (1024 ** 3), 2),
+            "total_gb": round(mem.total / (1024 ** 3), 2),
+        }
+    except Exception as e:
+        checks["memory"] = {"status": "unknown", "error": str(e)}
+
+    # NPU device check (if NPU provider)
+    if PROVIDER == "VitisAIExecutionProvider":
+        try:
+            import os
+            xrt_ok = os.path.exists("/opt/xilinx/xrt/lib/libxrt_core.so")
+            checks["npu"] = {
+                "status": "ok" if xrt_ok else "warning",
+                "provider": PROVIDER,
+                "xrt_library": xrt_ok,
+            }
+        except Exception as e:
+            checks["npu"] = {"status": "unknown", "error": str(e)}
+    else:
+        checks["npu"] = {"status": "not_applicable", "provider": PROVIDER}
+
+    # TLS status
+    checks["tls"] = tls_status()
+
+    return {
+        "status": overall,
+        "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "provider": PROVIDER,
+        "port": SERVER_PORT,
+        "uptime_seconds": uptime,
+        "checks": checks,
+    }
 
 
 if __name__ == "__main__":
