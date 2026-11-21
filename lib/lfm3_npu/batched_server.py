@@ -52,6 +52,7 @@ from lfm3_npu.security_headers import SecurityHeadersMiddleware
 from lfm3_npu.audit import get_audit
 from lfm3_npu.rbac import RBACAuth, role_required
 from lfm3_npu.multi_tenancy import TenantManager, extract_tenant_id, TENANT_HEADER, DEFAULT_TENANT_ID
+from lfm3_npu.model_registry import ModelRegistry, get_model_registry, MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY, MODEL_STATUS_PENDING, DEFAULT_MODEL_ID
 
 
 # ====================================================================== #
@@ -120,6 +121,15 @@ else:
 # Enterprise: multi-tenancy
 _tenant_manager = TenantManager()
 print(f"{SERVER_NAME}: Multi-tenancy enabled (default tenant: {DEFAULT_TENANT_ID})", flush=True)
+
+# Enterprise: model versioning / canary routing
+_model_registry = get_model_registry()
+_primary_model = _model_registry.get_primary()
+_canary_model = _model_registry.get_canary()
+if _primary_model:
+    print(f"{SERVER_NAME}: Model registry enabled (primary: {_primary_model.version}, canary: {_canary_model.version if _canary_model else 'none'})", flush=True)
+else:
+    print(f"{SERVER_NAME}: Model registry enabled (no primary model)", flush=True)
 
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
@@ -1259,6 +1269,14 @@ async def _chat_completions_impl(
         )
         raise HTTPException(status_code=429, detail=tenant_error)
 
+    # Enterprise: model versioning - resolve model version for this request
+    requested_version = request.headers.get("X-Model-Version") or req.model
+    selected_model = _model_registry.resolve_model_version(requested_version)
+    if selected_model is None:
+        raise HTTPException(status_code=503, detail="No model version available")
+    model_version = selected_model.version
+    model_start = time.perf_counter()
+
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
         "chat/completions", 0, max_tokens
@@ -1379,6 +1397,10 @@ async def _chat_completions_impl(
 
         # Enterprise: multi-tenancy - record tenant usage
         await _tenant_manager.record_tenant_usage(tenant_id, prompt_toks, completion_toks)
+
+        # Enterprise: model versioning - record per-version metrics
+        model_latency_ms = (time.perf_counter() - model_start) * 1000
+        _model_registry.record_request(model_version, duration_ms, error=False)
 
         # Enterprise: audit - inference completed
         _audit.inference_completed(
@@ -1854,6 +1876,209 @@ async def get_tenant_usage_endpoint(request: Request, tenant_id: str, _=Depends(
     if usage is None:
         raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' not found")
     return usage
+
+
+# ====================================================================== #
+# Model versioning / canary routing endpoints                              #
+# ====================================================================== #
+
+class ModelRegisterRequest(BaseModel):
+    version: str
+    model_id: str = DEFAULT_MODEL_ID
+    model_path: Optional[str] = None
+    tokenizer_path: Optional[str] = None
+    provider: Optional[str] = None
+    checksum: Optional[str] = None
+    notes: Optional[str] = None
+    status: str = MODEL_STATUS_PENDING
+
+
+class ModelCanarySetRequest(BaseModel):
+    version: str
+    traffic_percent: int
+
+
+@app.get("/v1/models/versions")
+async def list_model_versions(request: Request, _=Depends(verify_api_key)):
+    """List all model versions with status and metrics. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/versions")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    models = _model_registry.list_models()
+    return {
+        "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "total_versions": len(models),
+        "versions": [
+            {
+                "version": m.version,
+                "model_id": m.model_id,
+                "status": m.status,
+                "traffic_percent": m.traffic_percent,
+                "total_requests": m.total_requests,
+                "total_errors": m.total_errors,
+                "error_rate": round(m.error_rate, 4),
+                "avg_latency_ms": round(m.avg_latency_ms, 2),
+                "created_at": m.created_at,
+                "updated_at": m.updated_at,
+                "notes": m.notes,
+            }
+            for m in models
+        ],
+    }
+
+
+@app.get("/v1/models/versions/{version}")
+async def get_model_version(request: Request, version: str, _=Depends(verify_api_key)):
+    """Get details for a specific model version. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/versions/{version}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    model = _model_registry.get_model(version)
+    if model is None:
+        raise HTTPException(status_code=404, detail=f"Model version '{version}' not found")
+    return {
+        "version": model.version,
+        "model_id": model.model_id,
+        "status": model.status,
+        "traffic_percent": model.traffic_percent,
+        "model_path": model.model_path,
+        "tokenizer_path": model.tokenizer_path,
+        "provider": model.provider,
+        "checksum": model.checksum,
+        "notes": model.notes,
+        "total_requests": model.total_requests,
+        "total_errors": model.total_errors,
+        "error_rate": round(model.error_rate, 4),
+        "avg_latency_ms": round(model.avg_latency_ms, 2),
+        "created_at": model.created_at,
+        "updated_at": model.updated_at,
+    }
+
+
+@app.post("/v1/models/versions")
+async def register_model_version(
+    request: Request, model_req: ModelRegisterRequest, _=Depends(verify_api_key)
+):
+    """Register a new model version. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/versions")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    try:
+        model = _model_registry.register_model(
+            version=model_req.version,
+            model_id=model_req.model_id,
+            model_path=model_req.model_path,
+            tokenizer_path=model_req.tokenizer_path,
+            provider=model_req.provider,
+            checksum=model_req.checksum,
+            notes=model_req.notes,
+            status=model_req.status,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "ok",
+        "version": model.version,
+        "status": model.status,
+    }
+
+
+@app.post("/v1/models/canary")
+async def set_canary(request: Request, canary_req: ModelCanarySetRequest, _=Depends(verify_api_key)):
+    """Set a model version as canary with traffic percentage. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/canary")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    if not 0 <= canary_req.traffic_percent <= 100:
+        raise HTTPException(status_code=400, detail="traffic_percent must be between 0 and 100")
+
+    try:
+        model = _model_registry.set_canary(canary_req.version, canary_req.traffic_percent)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "ok",
+        "version": model.version,
+        "status": model.status,
+        "traffic_percent": model.traffic_percent,
+    }
+
+
+@app.post("/v1/models/canary/promote")
+async def promote_canary(request: Request, _=Depends(verify_api_key)):
+    """Promote the canary model to primary. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/canary/promote")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    try:
+        model = _model_registry.promote_canary()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "ok",
+        "version": model.version,
+        "status": model.status,
+        "previous_primary_demoted": True,
+    }
+
+
+@app.post("/v1/models/rollback")
+async def rollback_model(request: Request, _=Depends(verify_api_key)):
+    """Rollback: demote current primary, promote previous version. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/rollback")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    try:
+        model = _model_registry.rollback()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if model is None:
+        return {
+            "status": "ok",
+            "message": "Primary demoted; no previous version to promote",
+        }
+    return {
+        "status": "ok",
+        "version": model.version,
+        "status": model.status,
+        "rolled_back_to": model.version,
+    }
+
+
+@app.delete("/v1/models/versions/{version}")
+async def delete_model_version(request: Request, version: str, _=Depends(verify_api_key)):
+    """Delete a model version. Cannot delete the primary. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/models/versions/{version}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    try:
+        deleted = _model_registry.delete_model(version)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Model version '{version}' not found")
+    return {"status": "ok", "message": f"Model version '{version}' deleted"}
 
 
 # ====================================================================== #

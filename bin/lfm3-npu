@@ -27,6 +27,7 @@ Commands:
     recover         Recover all LFM3 servers (stop, start, wait for health)
     lb              Load balancer with health-based failover (start/status/stop)
     tenant          Multi-tenancy management (list/get/create/update/delete/usage)
+    model           Model versioning / canary routing (list/get/register/canary/promote/rollback/delete)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -1892,6 +1893,45 @@ def main() -> int:
     tenant_usage.add_argument("tenant_id", help="Tenant ID")
     tenant_usage.set_defaults(func=cmd_tenant_usage)
 
+    # ------------------------------------------------------------------
+    # Model versioning subcommand
+    # ------------------------------------------------------------------
+    model_parser = subparsers.add_parser("model", help="Model versioning / canary routing")
+    model_subparsers = model_parser.add_subparsers(dest="model_action", help="Model action")
+
+    model_list = model_subparsers.add_parser("list", help="List all model versions")
+    model_list.set_defaults(func=cmd_model_list)
+
+    model_get = model_subparsers.add_parser("get", help="Get model version details")
+    model_get.add_argument("version", help="Model version")
+    model_get.set_defaults(func=cmd_model_get)
+
+    model_register = model_subparsers.add_parser("register", help="Register a new model version")
+    model_register.add_argument("version", help="Model version (e.g., 2.0.0)")
+    model_register.add_argument("--model-id", default="lfm3-1.7b", help="Model ID")
+    model_register.add_argument("--model-path", default=None, help="Path to model file")
+    model_register.add_argument("--tokenizer-path", default=None, help="Path to tokenizer")
+    model_register.add_argument("--provider", default=None, help="Inference provider")
+    model_register.add_argument("--checksum", default=None, help="Model checksum")
+    model_register.add_argument("--notes", default=None, help="Notes")
+    model_register.add_argument("--status", default="pending", choices=["pending", "primary", "canary", "deprecated"], help="Initial status")
+    model_register.set_defaults(func=cmd_model_register)
+
+    model_canary = model_subparsers.add_parser("canary", help="Set canary model with traffic %%")
+    model_canary.add_argument("version", help="Model version to set as canary")
+    model_canary.add_argument("traffic", type=int, help="Traffic percentage (0-100)")
+    model_canary.set_defaults(func=cmd_model_canary)
+
+    model_promote = model_subparsers.add_parser("promote", help="Promote canary to primary")
+    model_promote.set_defaults(func=cmd_model_promote)
+
+    model_rollback = model_subparsers.add_parser("rollback", help="Rollback to previous version")
+    model_rollback.set_defaults(func=cmd_model_rollback)
+
+    model_delete = model_subparsers.add_parser("delete", help="Delete a model version")
+    model_delete.add_argument("version", help="Model version to delete")
+    model_delete.set_defaults(func=cmd_model_delete)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -2171,6 +2211,216 @@ def cmd_tenant_usage(args) -> int:
     print(f"Token quota: {quota_str}")
     print(f"Tokens remaining: {remaining_str}")
     print(f"Requests count: {data['requests_count']:,}")
+    return 0
+
+
+# ---------------------------------------------------------------------- #
+# Model CLI commands                                                     #
+# ---------------------------------------------------------------------- #
+
+def cmd_model_list(args) -> int:
+    """List all model versions."""
+    import urllib.request
+    import json
+
+    url = "http://127.0.0.1:1238/v1/models/versions"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except Exception as e:
+        print(f"Cannot reach CPU server at {url}: {e}")
+        return 1
+
+    print(f"Model versions ({data['total_versions']} total):")
+    print()
+    for m in data.get("versions", []):
+        status_marker = ""
+        if m["status"] == "primary":
+            status_marker = " [PRIMARY]"
+        elif m["status"] == "canary":
+            status_marker = f" [CANARY {m['traffic_percent']}%]"
+        elif m["status"] == "deprecated":
+            status_marker = " [DEPRECATED]"
+        print(f"  {m['version']}: {m['model_id']} ({m['status']}{status_marker})")
+        print(f"    Requests: {m['total_requests']:,}  Errors: {m['total_errors']:,}  "
+              f"Error rate: {m['error_rate']}  Avg latency: {m['avg_latency_ms']}ms")
+        if m.get("notes"):
+            print(f"    Notes: {m['notes']}")
+    return 0
+
+
+def cmd_model_get(args) -> int:
+    """Get model version details."""
+    import urllib.request
+    import json
+
+    url = f"http://127.0.0.1:1238/v1/models/versions/{args.version}"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Model version '{args.version}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+
+    print(f"Version: {data['version']}")
+    print(f"Model ID: {data['model_id']}")
+    print(f"Status: {data['status']}")
+    print(f"Traffic %: {data['traffic_percent']}")
+    print(f"Provider: {data.get('provider', 'N/A')}")
+    print(f"Model path: {data.get('model_path', 'N/A')}")
+    print(f"Tokenizer path: {data.get('tokenizer_path', 'N/A')}")
+    print(f"Checksum: {data.get('checksum', 'N/A')}")
+    print(f"Notes: {data.get('notes', 'N/A')}")
+    print(f"Requests: {data['total_requests']:,}")
+    print(f"Errors: {data['total_errors']:,}")
+    print(f"Error rate: {data['error_rate']}")
+    print(f"Avg latency: {data['avg_latency_ms']}ms")
+    return 0
+
+
+def cmd_model_register(args) -> int:
+    """Register a new model version."""
+    import urllib.request
+    import json
+
+    payload = {
+        "version": args.version,
+        "model_id": args.model_id,
+        "status": args.status,
+    }
+    if args.model_path is not None:
+        payload["model_path"] = args.model_path
+    if args.tokenizer_path is not None:
+        payload["tokenizer_path"] = args.tokenizer_path
+    if args.provider is not None:
+        payload["provider"] = args.provider
+    if args.checksum is not None:
+        payload["checksum"] = args.checksum
+    if args.notes is not None:
+        payload["notes"] = args.notes
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:1238/v1/models/versions",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"Model version '{args.version}' registered ({result['status']})")
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_model_canary(args) -> int:
+    """Set a model version as canary with traffic percentage."""
+    import urllib.request
+    import json
+
+    payload = {
+        "version": args.version,
+        "traffic_percent": args.traffic,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:1238/v1/models/canary",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"Canary set: {result['version']} at {result['traffic_percent']}% traffic")
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_model_promote(args) -> int:
+    """Promote canary to primary."""
+    import urllib.request
+    import json
+
+    req = urllib.request.Request(
+        "http://127.0.0.1:1238/v1/models/canary/promote",
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"Canary promoted to primary: {result['version']}")
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_model_rollback(args) -> int:
+    """Rollback to previous version."""
+    import urllib.request
+    import json
+
+    req = urllib.request.Request(
+        "http://127.0.0.1:1238/v1/models/rollback",
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        if "rolled_back_to" in result:
+            print(f"Rolled back to: {result['rolled_back_to']} ({result['status']})")
+        else:
+            print(result.get("message", "Rollback complete"))
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_model_delete(args) -> int:
+    """Delete a model version."""
+    import urllib.request
+    import json
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:1238/v1/models/versions/{args.version}",
+        method="DELETE",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(result["message"])
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Model version '{args.version}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
     return 0
 
 
