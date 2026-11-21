@@ -26,6 +26,7 @@ Commands:
     validate        Run startup validation of all LFM3 services
     recover         Recover all LFM3 servers (stop, start, wait for health)
     lb              Load balancer with health-based failover (start/status/stop)
+    tenant          Multi-tenancy management (list/get/create/update/delete/usage)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -1852,6 +1853,45 @@ def main() -> int:
     lb_stop = lb_subparsers.add_parser("stop", help="Stop load balancer")
     lb_stop.set_defaults(func=cmd_lb_stop)
 
+    # ------------------------------------------------------------------
+    # Tenant management subcommand
+    # ------------------------------------------------------------------
+    tenant_parser = subparsers.add_parser("tenant", help="Multi-tenancy management")
+    tenant_subparsers = tenant_parser.add_subparsers(dest="tenant_action", help="Tenant action")
+
+    tenant_list = tenant_subparsers.add_parser("list", help="List all tenants")
+    tenant_list.set_defaults(func=cmd_tenant_list)
+
+    tenant_get = tenant_subparsers.add_parser("get", help="Get tenant details")
+    tenant_get.add_argument("tenant_id", help="Tenant ID")
+    tenant_get.set_defaults(func=cmd_tenant_get)
+
+    tenant_create = tenant_subparsers.add_parser("create", help="Create a new tenant")
+    tenant_create.add_argument("tenant_id", help="Tenant ID")
+    tenant_create.add_argument("name", help="Tenant display name")
+    tenant_create.add_argument("--tier", default="free", choices=["free", "standard", "enterprise"], help="Tenant tier")
+    tenant_create.add_argument("--quota", type=int, default=None, help="Monthly token quota (0 = unlimited)")
+    tenant_create.add_argument("--rpm", type=int, default=None, help="Requests per minute limit")
+    tenant_create.set_defaults(func=cmd_tenant_create)
+
+    tenant_update = tenant_subparsers.add_parser("update", help="Update a tenant")
+    tenant_update.add_argument("tenant_id", help="Tenant ID")
+    tenant_update.add_argument("--name", default=None, help="New display name")
+    tenant_update.add_argument("--tier", default=None, choices=["free", "standard", "enterprise"], help="New tier")
+    tenant_update.add_argument("--quota", type=int, default=None, help="Monthly token quota (0 = unlimited)")
+    tenant_update.add_argument("--rpm", type=int, default=None, help="Requests per minute limit")
+    tenant_update.add_argument("--active", action="store_true", default=None, help="Set active")
+    tenant_update.add_argument("--inactive", action="store_true", default=None, help="Set inactive")
+    tenant_update.set_defaults(func=cmd_tenant_update)
+
+    tenant_delete = tenant_subparsers.add_parser("delete", help="Delete a tenant")
+    tenant_delete.add_argument("tenant_id", help="Tenant ID")
+    tenant_delete.set_defaults(func=cmd_tenant_delete)
+
+    tenant_usage = tenant_subparsers.add_parser("usage", help="Show tenant usage")
+    tenant_usage.add_argument("tenant_id", help="Tenant ID")
+    tenant_usage.set_defaults(func=cmd_tenant_usage)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1934,6 +1974,203 @@ def cmd_lb_stop(args) -> int:
         print("Load balancer stopped")
     else:
         print("No load balancer process found")
+    return 0
+
+
+# ---------------------------------------------------------------------- #
+# Tenant CLI commands                                                    #
+# ---------------------------------------------------------------------- #
+
+def cmd_tenant_list(args) -> int:
+    """List all tenants with usage statistics."""
+    import urllib.request
+    import json
+
+    url = "http://127.0.0.1:1238/v1/tenants"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except Exception as e:
+        print(f"Cannot reach CPU server at {url}: {e}")
+        return 1
+
+    print(f"Tenants ({data['total_tenants']} total):")
+    print()
+    for t in data.get("tenants", []):
+        status = "active" if t["active"] else "inactive"
+        quota = "unlimited" if t["tokens_quota"] == 0 else f'{t["tokens_quota"]:,}'
+        remaining = "unlimited" if t["tokens_remaining"] == -1 else f'{t["tokens_remaining"]:,}'
+        print(f"  {t['tenant_id']}: {t['name']}")
+        print(f"    Tier: {t['tier']}  Status: {status}  Priority: {t['priority']}")
+        print(f"    Tokens: {t['tokens_used']:,}/{quota}  Remaining: {remaining}")
+        print(f"    Requests: {t['requests_count']:,}")
+    return 0
+
+
+def cmd_tenant_get(args) -> int:
+    """Get a specific tenant's details."""
+    import urllib.request
+    import json
+
+    url = f"http://127.0.0.1:1238/v1/tenants/{args.tenant_id}"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Tenant '{args.tenant_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+
+    print(f"Tenant ID: {data['tenant_id']}")
+    print(f"Name: {data['name']}")
+    print(f"Tier: {data['tier']}")
+    print(f"Active: {data['active']}")
+    print(f"Priority: {data['priority']}")
+    print(f"Tokens used: {data['tokens_used']:,}")
+    quota_str = "unlimited" if data["tokens_quota"] == 0 else f"{data['tokens_quota']:,}"
+    remaining_str = "unlimited" if data["tokens_remaining"] == -1 else f"{data['tokens_remaining']:,}"
+    print(f"Token quota: {quota_str}")
+    print(f"Tokens remaining: {remaining_str}")
+    print(f"Requests count: {data['requests_count']:,}")
+    return 0
+
+
+def cmd_tenant_create(args) -> int:
+    """Create a new tenant."""
+    import urllib.request
+    import json
+
+    payload = {
+        "tenant_id": args.tenant_id,
+        "name": args.name,
+        "tier": args.tier,
+    }
+    if args.quota is not None:
+        payload["monthly_token_quota"] = args.quota
+    if args.rpm is not None:
+        payload["requests_per_minute"] = args.rpm
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:1238/v1/tenants",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"Tenant '{args.tenant_id}' created ({result['tenant']['tier']} tier)")
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_tenant_update(args) -> int:
+    """Update a tenant."""
+    import urllib.request
+    import json
+
+    payload = {}
+    if args.name is not None:
+        payload["name"] = args.name
+    if args.tier is not None:
+        payload["tier"] = args.tier
+    if args.quota is not None:
+        payload["monthly_token_quota"] = args.quota
+    if args.rpm is not None:
+        payload["requests_per_minute"] = args.rpm
+    if args.active is not None:
+        payload["active"] = True
+    if args.inactive is not None:
+        payload["active"] = False
+
+    if not payload:
+        print("No updates specified")
+        return 1
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:1238/v1/tenants/{args.tenant_id}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"Tenant '{args.tenant_id}' updated")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Tenant '{args.tenant_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_tenant_delete(args) -> int:
+    """Delete a tenant."""
+    import urllib.request
+    import json
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:1238/v1/tenants/{args.tenant_id}",
+        method="DELETE",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(result["message"])
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Tenant '{args.tenant_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_tenant_usage(args) -> int:
+    """Show a tenant's usage statistics."""
+    import urllib.request
+    import json
+
+    url = f"http://127.0.0.1:1238/v1/tenants/{args.tenant_id}/usage"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Tenant '{args.tenant_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+
+    print(f"Tenant: {data['tenant_id']} ({data['name']})")
+    print(f"Tier: {data['tier']}  Active: {data['active']}")
+    print(f"Priority: {data['priority']}")
+    print(f"Tokens used: {data['tokens_used']:,}")
+    quota_str = "unlimited" if data["tokens_quota"] == 0 else f"{data['tokens_quota']:,}"
+    remaining_str = "unlimited" if data["tokens_remaining"] == -1 else f"{data['tokens_remaining']:,}"
+    print(f"Token quota: {quota_str}")
+    print(f"Tokens remaining: {remaining_str}")
+    print(f"Requests count: {data['requests_count']:,}")
     return 0
 
 

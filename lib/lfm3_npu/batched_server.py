@@ -51,6 +51,7 @@ from lfm3_npu.validation import (
 from lfm3_npu.security_headers import SecurityHeadersMiddleware
 from lfm3_npu.audit import get_audit
 from lfm3_npu.rbac import RBACAuth, role_required
+from lfm3_npu.multi_tenancy import TenantManager, extract_tenant_id, TENANT_HEADER, DEFAULT_TENANT_ID
 
 
 # ====================================================================== #
@@ -115,6 +116,10 @@ if _rbac_auth.enabled:
     print(f"{SERVER_NAME}: RBAC authentication enabled ({len(key_infos)} key(s), roles: {sorted(roles)})", flush=True)
 else:
     print(f"{SERVER_NAME}: RBAC authentication disabled (open access)", flush=True)
+
+# Enterprise: multi-tenancy
+_tenant_manager = TenantManager()
+print(f"{SERVER_NAME}: Multi-tenancy enabled (default tenant: {DEFAULT_TENANT_ID})", flush=True)
 
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
@@ -1232,6 +1237,28 @@ async def _chat_completions_impl(
     estimated_prompt_tokens = len(tokenizer.encode(prompt).ids) if tokenizer else 0
     await _check_token_quota(api_key_hash, estimated_prompt_tokens + max_tokens)
 
+    # Enterprise: multi-tenancy - extract tenant ID and enforce tenant quota
+    tenant_id = extract_tenant_id(dict(request.headers))
+    tenant_error = await _tenant_manager.check_tenant_quota(
+        tenant_id, estimated_prompt_tokens + max_tokens
+    )
+    if tenant_error:
+        _audit.authz_denied(
+            actor=api_key_hash or client_ip,
+            resource="/v1/chat/completions",
+            request_id=request_id,
+        )
+        log_event(
+            "tenant.quota_exceeded",
+            request_id=request_id,
+            client_ip=client_ip,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=429,
+            extra={"tenant_id": tenant_id, "error": tenant_error},
+        )
+        raise HTTPException(status_code=429, detail=tenant_error)
+
     with trace_request(
         tracer, PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
         "chat/completions", 0, max_tokens
@@ -1349,6 +1376,9 @@ async def _chat_completions_impl(
         completion_toks = len(tokenizer.encode(generated_text).ids)
         prompt_toks = len(tokenizer.encode(prompt).ids)
         await _record_token_usage(api_key_hash, prompt_toks, completion_toks)
+
+        # Enterprise: multi-tenancy - record tenant usage
+        await _tenant_manager.record_tenant_usage(tenant_id, prompt_toks, completion_toks)
 
         # Enterprise: audit - inference completed
         _audit.inference_completed(
@@ -1672,6 +1702,158 @@ async def set_token_quota(request: Request, quota: Dict[str, Any]):
     _token_quotas[key_hash] = max_tokens
     _log("INFO", "token_quota_set", key_hash=key_hash[:8] + "...", max_tokens=max_tokens)
     return {"status": "ok", "key_hash": key_hash[:8] + "...", "max_tokens": max_tokens}
+
+
+# ====================================================================== #
+# Multi-tenancy endpoints                                                  #
+# ====================================================================== #
+
+from pydantic import BaseModel
+
+
+class TenantCreateRequest(BaseModel):
+    tenant_id: str
+    name: str
+    tier: str = "free"
+    monthly_token_quota: Optional[int] = None
+    requests_per_minute: Optional[int] = None
+    concurrent_requests: Optional[int] = None
+    allowed_roles: Optional[List[str]] = None
+
+
+class TenantUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    tier: Optional[str] = None
+    monthly_token_quota: Optional[int] = None
+    requests_per_minute: Optional[int] = None
+    concurrent_requests: Optional[int] = None
+    allowed_roles: Optional[List[str]] = None
+    active: Optional[bool] = None
+
+
+@app.get("/v1/tenants")
+async def list_tenants(request: Request, _=Depends(verify_api_key)):
+    """List all tenants with usage statistics. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/tenants")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    usage = await _tenant_manager.get_all_usage()
+    return {
+        "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "total_tenants": len(usage),
+        "tenants": usage,
+    }
+
+
+@app.get("/v1/tenants/{tenant_id}")
+async def get_tenant(request: Request, tenant_id: str, _=Depends(verify_api_key)):
+    """Get a specific tenant's details and usage. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/tenants/{tenant_id}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    usage = await _tenant_manager.get_tenant_usage(tenant_id)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' not found")
+    return usage
+
+
+@app.post("/v1/tenants")
+async def create_tenant(request: Request, tenant_req: TenantCreateRequest, _=Depends(verify_api_key)):
+    """Create a new tenant. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/tenants")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    try:
+        tenant = await _tenant_manager.create_tenant(
+            tenant_id=tenant_req.tenant_id,
+            name=tenant_req.name,
+            tier=tenant_req.tier,
+            monthly_token_quota=tenant_req.monthly_token_quota,
+            requests_per_minute=tenant_req.requests_per_minute,
+            concurrent_requests=tenant_req.concurrent_requests,
+            allowed_roles=tenant_req.allowed_roles,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "ok",
+        "tenant": tenant.to_dict(),
+    }
+
+
+@app.put("/v1/tenants/{tenant_id}")
+async def update_tenant(request: Request, tenant_id: str, tenant_req: TenantUpdateRequest, _=Depends(verify_api_key)):
+    """Update a tenant. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/tenants/{tenant_id}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    tenant = await _tenant_manager.update_tenant(
+        tenant_id=tenant_id,
+        name=tenant_req.name,
+        tier=tenant_req.tier,
+        monthly_token_quota=tenant_req.monthly_token_quota,
+        requests_per_minute=tenant_req.requests_per_minute,
+        concurrent_requests=tenant_req.concurrent_requests,
+        allowed_roles=tenant_req.allowed_roles,
+        active=tenant_req.active,
+    )
+    if tenant is None:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' not found")
+    return {
+        "status": "ok",
+        "tenant": tenant.to_dict(),
+    }
+
+
+@app.delete("/v1/tenants/{tenant_id}")
+async def delete_tenant(request: Request, tenant_id: str, _=Depends(verify_api_key)):
+    """Delete a tenant. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/tenants/{tenant_id}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    try:
+        deleted = await _tenant_manager.delete_tenant(tenant_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' not found")
+    return {"status": "ok", "message": f"Tenant '{tenant_id}' deleted"}
+
+
+@app.get("/v1/tenants/{tenant_id}/usage")
+async def get_tenant_usage_endpoint(request: Request, tenant_id: str, _=Depends(verify_api_key)):
+    """Get a specific tenant's usage. Requires admin role, or the tenant itself."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "read", "/v1/tenants/{tenant_id}/usage")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Non-admin users can only view their own tenant (derived from API key label)
+    if key_info and key_info.role != "admin":
+        caller_tenant = key_info.label  # API key label used as tenant hint
+        if caller_tenant != tenant_id:
+            raise HTTPException(status_code=403, detail="Cannot view another tenant's usage")
+
+    usage = await _tenant_manager.get_tenant_usage(tenant_id)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' not found")
+    return usage
 
 
 # ====================================================================== #
