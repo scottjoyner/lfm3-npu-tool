@@ -55,6 +55,7 @@ from lfm3_npu.multi_tenancy import TenantManager, extract_tenant_id, TENANT_HEAD
 from lfm3_npu.model_registry import ModelRegistry, get_model_registry, MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY, MODEL_STATUS_PENDING, DEFAULT_MODEL_ID
 from lfm3_npu.api_key_management import KeyManager, generate_api_key, hash_key, get_key_manager, KEY_PREFIX
 from lfm3_npu.alerting import get_alert_manager, ALERT_CRITICAL, ALERT_WARNING
+from lfm3_npu.cost_tracking import get_cost_tracker
 
 
 # ====================================================================== #
@@ -144,6 +145,10 @@ _alert_manager.send_info(
     source=SERVER_NAME,
     details={"provider": PROVIDER, "port": SERVER_PORT, "pid": os.getpid()},
 )
+
+# Enterprise: cost tracking
+_cost_tracker = get_cost_tracker()
+print(f"{SERVER_NAME}: Cost tracking enabled (currency: {_cost_tracker.currency})", flush=True)
 
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
@@ -1445,6 +1450,14 @@ async def _chat_completions_impl(
                 error=False,
                 client_ip=client_ip,
             )
+
+        # Enterprise: cost tracking - record tenant cost
+        cost_result = _cost_tracker.record_tenant_cost(
+            tenant_id,
+            input_tokens=prompt_toks,
+            output_tokens=completion_toks,
+            tier_name="standard",
+        )
 
         # Enterprise: model versioning - record per-version metrics
         model_latency_ms = (time.perf_counter() - model_start) * 1000

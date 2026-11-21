@@ -32,6 +32,7 @@ Commands:
     keys            API key management (list/get/create/update/revoke/rotate/usage)
     alert           Alert notifications (--test --severity --message --webhook-url)
     regress         Performance regression detection (baseline/check)
+    cost            Cost tracking and billing (calculate/record/report/invoice)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -569,6 +570,96 @@ def cmd_regress_check(args) -> int:
     # Exit with error if critical regression detected
     if any(r.severity == "critical" for r in results):
         return 1
+    return 0
+
+
+def cmd_cost_calculate(args) -> int:
+    """Calculate cost for token counts."""
+    from lfm3_npu.cost_tracking import CostTracker
+
+    tracker = CostTracker()
+    cost = tracker.calculate_cost(
+        args.input_tokens, args.output_tokens, args.tier
+    )
+    if args.format == "json":
+        print(json.dumps(cost, indent=2))
+    else:
+        print(f"Cost calculation ({args.tier} tier, {args.currency}):")
+        print(f"  Input tokens:  {args.input_tokens:,}  Cost: {cost['input_cost']:.6f}")
+        print(f"  Output tokens: {args.output_tokens:,}  Cost: {cost['output_cost']:.6f}")
+        print(f"  Total cost:    {cost['total_cost']:.6f} {args.currency}")
+    return 0
+
+
+def cmd_cost_record(args) -> int:
+    """Record tenant cost."""
+    from lfm3_npu.cost_tracking import CostTracker
+
+    tracker = CostTracker()
+    record = tracker.record_tenant_cost(
+        args.tenant_id,
+        args.input_tokens,
+        args.output_tokens,
+        args.tier,
+        args.period,
+    )
+    print(f"Cost recorded for {args.tenant_id} ({args.period or 'current period'}):")
+    print(f"  Input tokens:  {record.input_tokens:,}")
+    print(f"  Output tokens: {record.output_tokens:,}")
+    print(f"  Total cost:    {record.total_cost:.6f} {tracker.currency}")
+    return 0
+
+
+def cmd_cost_report(args) -> int:
+    """Show cost report."""
+    from lfm3_npu.cost_tracking import CostTracker
+
+    tracker = CostTracker()
+    if args.tenant_id:
+        summary = tracker.get_tenant_summary(args.tenant_id)
+        if args.format == "json":
+            print(json.dumps(summary, indent=2))
+        else:
+            print(f"Cost summary for {args.tenant_id}:")
+            print(f"  Total cost:       {summary['total_cost']:.6f} {summary['currency']}")
+            print(f"  Input tokens:     {summary['total_input_tokens']:,}")
+            print(f"  Output tokens:    {summary['total_output_tokens']:,}")
+            print(f"  Total requests:   {summary['total_requests']:,}")
+            print(f"  Periods: {len(summary['periods'])}")
+            for p in summary["periods"]:
+                print(f"    {p['period']}: {p['total_cost']:.6f} ({p['request_count']} requests)")
+    else:
+        all_costs = tracker.get_all_costs(args.period)
+        if args.format == "json":
+            print(json.dumps(all_costs, indent=2))
+        else:
+            period_label = args.period or "current period"
+            print(f"Cost report ({period_label}, {len(all_costs)} tenants):")
+            print()
+            for c in all_costs:
+                print(f"  {c['tenant_id']}: {c['total_cost']:.6f} {tracker.currency} "
+                      f"({c['input_tokens']:,} in / {c['output_tokens']:,} out, "
+                      f"{c['request_count']} requests)")
+    return 0
+
+
+def cmd_cost_invoice(args) -> int:
+    """Generate invoice."""
+    from lfm3_npu.cost_tracking import CostTracker
+
+    tracker = CostTracker()
+    invoice = tracker.generate_invoice(args.tenant_id, args.period)
+    if args.format == "json":
+        print(json.dumps(invoice, indent=2))
+    else:
+        print(f"Invoice for {invoice['tenant_id']} - Period: {invoice['period']}")
+        print(f"  Status: {invoice['status']}")
+        if invoice["status"] == "issued":
+            print(f"  Input tokens:  {invoice['input_tokens']:,}  Cost: {invoice['input_cost']:.6f}")
+            print(f"  Output tokens: {invoice['output_tokens']:,}  Cost: {invoice['output_cost']:.6f}")
+            print(f"  Total cost:    {invoice['total_cost']:.6f} {invoice['currency']}")
+            print(f"  Requests:      {invoice['request_count']:,}")
+        print(f"  Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(invoice['generated_at']))}")
     return 0
 
 
@@ -2120,6 +2211,38 @@ def main() -> int:
     regress_check.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
     regress_check.add_argument("--output", default=None, help="Output file")
     regress_check.set_defaults(func=cmd_regress_check)
+
+    # cost
+    cost_parser = subparsers.add_parser("cost", help="Cost tracking and billing")
+    cost_subparsers = cost_parser.add_subparsers(dest="cost_action", help="Cost action")
+
+    cost_calc = cost_subparsers.add_parser("calculate", help="Calculate cost for token counts")
+    cost_calc.add_argument("--input-tokens", type=int, required=True, help="Input token count")
+    cost_calc.add_argument("--output-tokens", type=int, required=True, help="Output token count")
+    cost_calc.add_argument("--tier", default="standard", choices=["free", "standard", "enterprise"], help="Pricing tier")
+    cost_calc.add_argument("--currency", default="USD", help="Currency code")
+    cost_calc.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    cost_calc.set_defaults(func=cmd_cost_calculate)
+
+    cost_record = cost_subparsers.add_parser("record", help="Record tenant cost")
+    cost_record.add_argument("--tenant-id", required=True, help="Tenant ID")
+    cost_record.add_argument("--input-tokens", type=int, required=True, help="Input token count")
+    cost_record.add_argument("--output-tokens", type=int, required=True, help="Output token count")
+    cost_record.add_argument("--tier", default="standard", help="Pricing tier")
+    cost_record.add_argument("--period", default=None, help="Billing period YYYY-MM")
+    cost_record.set_defaults(func=cmd_cost_record)
+
+    cost_report = cost_subparsers.add_parser("report", help="Show cost report")
+    cost_report.add_argument("--tenant-id", default=None, help="Tenant ID (all if omitted)")
+    cost_report.add_argument("--period", default=None, help="Billing period YYYY-MM")
+    cost_report.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    cost_report.set_defaults(func=cmd_cost_report)
+
+    cost_invoice = cost_subparsers.add_parser("invoice", help="Generate invoice")
+    cost_invoice.add_argument("--tenant-id", required=True, help="Tenant ID")
+    cost_invoice.add_argument("--period", default=None, help="Billing period YYYY-MM")
+    cost_invoice.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    cost_invoice.set_defaults(func=cmd_cost_invoice)
 
     # fleet-monitor
     fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")
