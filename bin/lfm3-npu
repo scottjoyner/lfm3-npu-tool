@@ -29,6 +29,7 @@ Commands:
     tenant          Multi-tenancy management (list/get/create/update/delete/usage)
     model           Model versioning / canary routing (list/get/register/canary/promote/rollback/delete)
     security        Automated security scanning (scan --severity --fail-on)
+    keys            API key management (list/get/create/update/revoke/rotate/usage)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -269,6 +270,236 @@ def cmd_security(args) -> int:
         print(result.stderr, end="", file=sys.stderr)
 
     return result.returncode
+
+
+# API key management CLI functions
+def cmd_keys_list(args) -> int:
+    """List all API keys."""
+    import urllib.request
+    import json
+
+    url = "http://127.0.0.1:1238/v1/keys"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except Exception as e:
+        print(f"Cannot reach CPU server at {url}: {e}")
+        return 1
+
+    print(f"API keys ({data['total_keys']} total):")
+    print()
+    for k in data.get("keys", []):
+        status = "active" if k["active"] else "revoked"
+        expired = " (EXPIRED)" if k["is_expired"] else ""
+        print(f"  {k['key_id']}: {k['role']} {status}{expired}")
+        print(f"    Label: {k['label']}  Name: {k['name'] or 'N/A'}")
+        print(f"    Created: {k['created_at']:.0f}  Requests: {k['total_requests']:,}")
+    return 0
+
+
+def cmd_keys_get(args) -> int:
+    """Get API key details."""
+    import urllib.request
+    import json
+
+    url = f"http://127.0.0.1:1238/v1/keys/{args.key_id}"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"API key '{args.key_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+
+    print(f"Key ID: {data['key_id']}")
+    print(f"Role: {data['role']}")
+    print(f"Label: {data['label']}")
+    print(f"Name: {data['name'] or 'N/A'}")
+    print(f"Description: {data['description'] or 'N/A'}")
+    print(f"Active: {data['active']}")
+    print(f"Expired: {data['is_expired']}")
+    print(f"Rate limit RPM: {data['rate_limit_rpm'] or 'unlimited'}")
+    print(f"Total requests: {data['total_requests']:,}")
+    print(f"Total errors: {data['total_errors']:,}")
+    print(f"Total tokens: {data['total_tokens']:,}")
+    print(f"Created: {data['created_at']:.0f}")
+    print(f"Last used: {data['last_used_at'] or 'never'}")
+    return 0
+
+
+def cmd_keys_create(args) -> int:
+    """Create a new API key."""
+    import urllib.request
+    import json
+
+    payload = {
+        "role": args.role,
+        "label": args.label,
+    }
+    if args.name is not None:
+        payload["name"] = args.name
+    if args.description is not None:
+        payload["description"] = args.description
+    if args.expires_in_days is not None:
+        payload["expires_in_days"] = args.expires_in_days
+    if args.rate_limit_rpm is not None:
+        payload["rate_limit_rpm"] = args.rate_limit_rpm
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:1238/v1/keys",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"API key created!")
+        print(f"  Key ID: {result['key']['key_id']}")
+        print(f"  API Key: {result['api_key']}")
+        print(f"  Role: {result['key']['role']}")
+        print(f"  WARNING: Save this key now - it cannot be retrieved again")
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_keys_update(args) -> int:
+    """Update API key metadata."""
+    import urllib.request
+    import json
+
+    payload = {}
+    if args.name is not None:
+        payload["name"] = args.name
+    if args.description is not None:
+        payload["description"] = args.description
+    if args.role is not None:
+        payload["role"] = args.role
+    if args.label is not None:
+        payload["label"] = args.label
+    if args.rate_limit_rpm is not None:
+        payload["rate_limit_rpm"] = args.rate_limit_rpm
+    if args.active is not None:
+        payload["active"] = True
+    if args.inactive is not None:
+        payload["active"] = False
+
+    if not payload:
+        print("No updates specified")
+        return 1
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:1238/v1/keys/{args.key_id}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"API key '{args.key_id}' updated")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"API key '{args.key_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_keys_revoke(args) -> int:
+    """Revoke an API key."""
+    import urllib.request
+    import json
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:1238/v1/keys/{args.key_id}",
+        method="DELETE",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(result["message"])
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"API key '{args.key_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_keys_rotate(args) -> int:
+    """Rotate an API key."""
+    import urllib.request
+    import json
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:1238/v1/keys/{args.key_id}/rotate",
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode("utf-8"))
+        print(f"API key rotated!")
+        print(f"  Key ID: {result['key']['key_id']}")
+        print(f"  New API Key: {result['api_key']}")
+        print(f"  WARNING: Save this key now - it cannot be retrieved again")
+        print(f"  Old key is invalidated")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"API key '{args.key_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+def cmd_keys_usage(args) -> int:
+    """Show API key usage statistics."""
+    import urllib.request
+    import json
+
+    url = f"http://127.0.0.1:1238/v1/keys/{args.key_id}/usage"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"API key '{args.key_id}' not found")
+        else:
+            print(f"Error: HTTP {e.code} - {e.read().decode()[:200]}")
+        return 1
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
+        return 1
+
+    print(f"Key ID: {data['key_id']}")
+    print(f"Role: {data['role']}")
+    print(f"Total requests: {data['total_requests']:,}")
+    print(f"Total errors: {data['total_errors']:,}")
+    print(f"Total tokens: {data['total_tokens']:,}")
+    print(f"Last used: {data['last_used_at'] or 'never'}")
+    print(f"Last used IP: {data['last_used_ip'] or 'N/A'}")
+    return 0
 
 
 # Fleet monitor functions (defined inline to avoid circular imports)
@@ -1733,6 +1964,49 @@ def main() -> int:
     security_parser.add_argument("--fail-on", choices=["info", "low", "medium", "high", "critical"],
                                  default=None, help="Exit with error if findings at this severity or above")
     security_parser.set_defaults(func=cmd_security)
+
+    # keys - API key management
+    keys_parser = subparsers.add_parser("keys", help="API key management")
+    keys_subparsers = keys_parser.add_subparsers(dest="keys_action", help="Key action")
+
+    keys_list = keys_subparsers.add_parser("list", help="List all API keys")
+    keys_list.set_defaults(func=cmd_keys_list)
+
+    keys_get = keys_subparsers.add_parser("get", help="Get API key details")
+    keys_get.add_argument("key_id", help="Key ID (first 8 chars of hash)")
+    keys_get.set_defaults(func=cmd_keys_get)
+
+    keys_create = keys_subparsers.add_parser("create", help="Create a new API key")
+    keys_create.add_argument("--role", default="viewer", choices=["admin", "operator", "viewer", "auditor"], help="Key role")
+    keys_create.add_argument("--label", default="", help="Key label")
+    keys_create.add_argument("--name", default=None, help="Display name")
+    keys_create.add_argument("--description", default=None, help="Description")
+    keys_create.add_argument("--expires-in-days", type=int, default=None, help="Days until expiration")
+    keys_create.add_argument("--rate-limit-rpm", type=int, default=None, help="Requests per minute limit")
+    keys_create.set_defaults(func=cmd_keys_create)
+
+    keys_update = keys_subparsers.add_parser("update", help="Update API key metadata")
+    keys_update.add_argument("key_id", help="Key ID")
+    keys_update.add_argument("--name", default=None, help="New display name")
+    keys_update.add_argument("--description", default=None, help="New description")
+    keys_update.add_argument("--role", default=None, choices=["admin", "operator", "viewer", "auditor"], help="New role")
+    keys_update.add_argument("--label", default=None, help="New label")
+    keys_update.add_argument("--rate-limit-rpm", type=int, default=None, help="New RPM limit")
+    keys_update.add_argument("--active", action="store_true", default=None, help="Set active")
+    keys_update.add_argument("--inactive", action="store_true", default=None, help="Set inactive")
+    keys_update.set_defaults(func=cmd_keys_update)
+
+    keys_revoke = keys_subparsers.add_parser("revoke", help="Revoke an API key")
+    keys_revoke.add_argument("key_id", help="Key ID")
+    keys_revoke.set_defaults(func=cmd_keys_revoke)
+
+    keys_rotate = keys_subparsers.add_parser("rotate", help="Rotate an API key (new value)")
+    keys_rotate.add_argument("key_id", help="Key ID")
+    keys_rotate.set_defaults(func=cmd_keys_rotate)
+
+    keys_usage = keys_subparsers.add_parser("usage", help="Show key usage statistics")
+    keys_usage.add_argument("key_id", help="Key ID")
+    keys_usage.set_defaults(func=cmd_keys_usage)
 
     # fleet-monitor
     fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")

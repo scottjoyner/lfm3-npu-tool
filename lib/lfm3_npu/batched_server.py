@@ -53,6 +53,7 @@ from lfm3_npu.audit import get_audit
 from lfm3_npu.rbac import RBACAuth, role_required
 from lfm3_npu.multi_tenancy import TenantManager, extract_tenant_id, TENANT_HEADER, DEFAULT_TENANT_ID
 from lfm3_npu.model_registry import ModelRegistry, get_model_registry, MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY, MODEL_STATUS_PENDING, DEFAULT_MODEL_ID
+from lfm3_npu.api_key_management import KeyManager, generate_api_key, hash_key, get_key_manager, KEY_PREFIX
 
 
 # ====================================================================== #
@@ -130,6 +131,10 @@ if _primary_model:
     print(f"{SERVER_NAME}: Model registry enabled (primary: {_primary_model.version}, canary: {_canary_model.version if _canary_model else 'none'})", flush=True)
 else:
     print(f"{SERVER_NAME}: Model registry enabled (no primary model)", flush=True)
+
+# Enterprise: API key management
+_key_manager = KeyManager()
+print(f"{SERVER_NAME}: API key management enabled ({len(_key_manager.list_keys())} key(s))", flush=True)
 
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
@@ -1398,6 +1403,15 @@ async def _chat_completions_impl(
         # Enterprise: multi-tenancy - record tenant usage
         await _tenant_manager.record_tenant_usage(tenant_id, prompt_toks, completion_toks)
 
+        # Enterprise: API key management - record key usage
+        if api_key_hash:
+            _key_manager.record_key_usage(
+                api_key_hash,
+                tokens=prompt_toks + completion_toks,
+                error=False,
+                client_ip=client_ip,
+            )
+
         # Enterprise: model versioning - record per-version metrics
         model_latency_ms = (time.perf_counter() - model_start) * 1000
         _model_registry.record_request(model_version, duration_ms, error=False)
@@ -2079,6 +2093,256 @@ async def delete_model_version(request: Request, version: str, _=Depends(verify_
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Model version '{version}' not found")
     return {"status": "ok", "message": f"Model version '{version}' deleted"}
+
+
+# ====================================================================== #
+# API key management endpoints                                           #
+# ====================================================================== #
+
+from pydantic import BaseModel
+
+
+class ApiKeyCreateRequest(BaseModel):
+    role: str = "viewer"
+    label: str = ""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    expires_in_days: Optional[int] = None
+    rate_limit_rpm: Optional[int] = None
+    allowed_ips: Optional[List[str]] = None
+
+
+class ApiKeyUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    role: Optional[str] = None
+    label: Optional[str] = None
+    rate_limit_rpm: Optional[int] = None
+    allowed_ips: Optional[List[str]] = None
+    active: Optional[bool] = None
+    expires_in_days: Optional[int] = None
+
+
+@app.get("/v1/keys")
+async def list_api_keys(request: Request, _=Depends(verify_api_key)):
+    """List all API keys (masked). Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    keys = _key_manager.list_keys()
+    return {
+        "server": f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
+        "total_keys": len(keys),
+        "keys": [k.to_dict() for k in keys],
+    }
+
+
+@app.get("/v1/keys/{key_id}")
+async def get_api_key(request: Request, key_id: str, _=Depends(verify_api_key)):
+    """Get API key details by key ID (first 8 chars of hash). Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys/{key_id}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Find key by key_id (first 8 chars of hash)
+    key = None
+    for k in _key_manager.list_keys():
+        if k.key_id == key_id:
+            key = k
+            break
+    if key is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return key.to_dict()
+
+
+@app.get("/v1/keys/me")
+async def get_my_api_key(request: Request, _=Depends(verify_api_key)):
+    """Get current API key's details. Self-service endpoint."""
+    key_info = getattr(request.state, "api_key_info", None)
+    if key_info is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Find key by hash
+    key_hash = getattr(request.state, "api_key_hash", None)
+    if not key_hash:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    key = _key_manager.get_key(key_hash)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return key.to_dict()
+
+
+@app.get("/v1/keys/me/usage")
+async def get_my_api_key_usage(request: Request, _=Depends(verify_api_key)):
+    """Get current API key's usage statistics. Self-service endpoint."""
+    key_info = getattr(request.state, "api_key_info", None)
+    if key_info is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    key_hash = getattr(request.state, "api_key_hash", None)
+    if not key_hash:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    usage = _key_manager.get_key_usage(key_hash)
+    if usage is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return usage
+
+
+@app.get("/v1/keys/{key_id}/usage")
+async def get_api_key_usage(request: Request, key_id: str, _=Depends(verify_api_key)):
+    """Get API key usage statistics. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys/{key_id}/usage")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Find key by key_id
+    key = None
+    for k in _key_manager.list_keys():
+        if k.key_id == key_id:
+            key = k
+            break
+    if key is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+
+    usage = _key_manager.get_key_usage(key.key_hash)
+    if usage is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return usage
+
+
+@app.post("/v1/keys")
+async def create_api_key(request: Request, key_req: ApiKeyCreateRequest, _=Depends(verify_api_key)):
+    """Create a new API key. The raw key is returned only once. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    valid_roles = ["admin", "operator", "viewer", "auditor"]
+    if key_req.role not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {valid_roles}")
+
+    raw_key, key = _key_manager.create_key(
+        role=key_req.role,
+        label=key_req.label,
+        name=key_req.name,
+        description=key_req.description,
+        expires_in_days=key_req.expires_in_days,
+        rate_limit_rpm=key_req.rate_limit_rpm,
+        allowed_ips=key_req.allowed_ips,
+    )
+    return {
+        "status": "ok",
+        "api_key": raw_key,  # Only returned once!
+        "key": key.to_dict(),
+        "warning": "Save this key now - it cannot be retrieved again",
+    }
+
+
+@app.put("/v1/keys/{key_id}")
+async def update_api_key(
+    request: Request, key_id: str, key_req: ApiKeyUpdateRequest, _=Depends(verify_api_key)
+):
+    """Update API key metadata. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys/{key_id}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Find key by key_id
+    key = None
+    for k in _key_manager.list_keys():
+        if k.key_id == key_id:
+            key = k
+            break
+    if key is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+
+    updated = _key_manager.update_key(
+        key_hash=key.key_hash,
+        name=key_req.name,
+        description=key_req.description,
+        role=key_req.role,
+        label=key_req.label,
+        rate_limit_rpm=key_req.rate_limit_rpm,
+        allowed_ips=key_req.allowed_ips,
+        active=key_req.active,
+        expires_in_days=key_req.expires_in_days,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return {
+        "status": "ok",
+        "key": updated.to_dict(),
+    }
+
+
+@app.delete("/v1/keys/{key_id}")
+async def delete_api_key(request: Request, key_id: str, _=Depends(verify_api_key)):
+    """Revoke (deactivate) an API key. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys/{key_id}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Find key by key_id
+    key = None
+    for k in _key_manager.list_keys():
+        if k.key_id == key_id:
+            key = k
+            break
+    if key is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+
+    revoked = _key_manager.revoke_key(key.key_hash)
+    if not revoked:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return {
+        "status": "ok",
+        "message": f"API key '{key_id}' revoked",
+    }
+
+
+@app.post("/v1/keys/{key_id}/rotate")
+async def rotate_api_key(request: Request, key_id: str, _=Depends(verify_api_key)):
+    """Rotate an API key: generate new raw key value. Requires admin role."""
+    key_info = getattr(request.state, "api_key_info", None)
+    try:
+        _rbac_auth.require_permission(key_info, "admin", "/v1/keys/{key_id}/rotate")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Find key by key_id
+    key = None
+    for k in _key_manager.list_keys():
+        if k.key_id == key_id:
+            key = k
+            break
+    if key is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+
+    result = _key_manager.rotate_key(key.key_hash)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    raw_key, new_key = result
+    return {
+        "status": "ok",
+        "api_key": raw_key,  # New key value - only returned once!
+        "key": new_key.to_dict(),
+        "warning": "Save this key now - it cannot be retrieved again. Old key is invalidated.",
+    }
 
 
 # ====================================================================== #
