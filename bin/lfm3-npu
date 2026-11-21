@@ -31,6 +31,7 @@ Commands:
     security        Automated security scanning (scan --severity --fail-on)
     keys            API key management (list/get/create/update/revoke/rotate/usage)
     alert           Alert notifications (--test --severity --message --webhook-url)
+    regress         Performance regression detection (baseline/check)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -516,6 +517,58 @@ def cmd_alert(args) -> int:
     )
     results = alerts.send(alert)
     print(f"Alert sent: {results}")
+    return 0
+
+
+def cmd_regress_baseline(args) -> int:
+    """Set baseline metrics for regression detection."""
+    import json
+    from lfm3_npu.regression_detection import RegressionDetector
+
+    detector = RegressionDetector()
+    metrics = {
+        "ttft_ms": args.ttft_ms,
+        "decode_tps": args.decode_tps,
+        "p95_latency_ms": args.p95_latency_ms,
+        "error_rate": args.error_rate,
+        "availability": args.availability,
+    }
+    detector.set_baseline(args.server, metrics)
+    print(f"Baseline set for {args.server}:")
+    for k, v in metrics.items():
+        print(f"  {k}: {v}")
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump({args.server: metrics}, f, indent=2)
+        print(f"Baseline saved to {args.output}")
+    return 0
+
+
+def cmd_regress_check(args) -> int:
+    """Check for performance regressions."""
+    from lfm3_npu.regression_detection import RegressionDetector
+
+    detector = RegressionDetector()
+    metrics = {
+        "ttft_ms": args.ttft_ms,
+        "decode_tps": args.decode_tps,
+        "p95_latency_ms": args.p95_latency_ms,
+        "error_rate": args.error_rate,
+        "availability": args.availability,
+    }
+    results = detector.check_regression(args.server, metrics)
+    report = detector.generate_report(results, format=args.format)
+
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(report)
+        print(f"Report saved to {args.output}")
+    else:
+        print(report)
+
+    # Exit with error if critical regression detected
+    if any(r.severity == "critical" for r in results):
+        return 1
     return 0
 
 
@@ -2042,6 +2095,31 @@ def main() -> int:
         "--source", default="lfm3-inference", help="Alert source"
     )
     alert_parser.set_defaults(func=cmd_alert)
+
+    # regress
+    regress_parser = subparsers.add_parser("regress", help="Performance regression detection")
+    regress_subparsers = regress_parser.add_subparsers(dest="regress_action", help="Regression action")
+
+    regress_baseline = regress_subparsers.add_parser("baseline", help="Set baseline metrics")
+    regress_baseline.add_argument("--server", required=True, help="Server name")
+    regress_baseline.add_argument("--ttft-ms", type=float, required=True, help="Baseline TTFT ms")
+    regress_baseline.add_argument("--decode-tps", type=float, required=True, help="Baseline decode TPS")
+    regress_baseline.add_argument("--p95-latency-ms", type=float, required=True, help="Baseline p95 latency ms")
+    regress_baseline.add_argument("--error-rate", type=float, default=0.0, help="Baseline error rate")
+    regress_baseline.add_argument("--availability", type=float, default=100.0, help="Baseline availability %%")
+    regress_baseline.add_argument("--output", default=None, help="Output file")
+    regress_baseline.set_defaults(func=cmd_regress_baseline)
+
+    regress_check = regress_subparsers.add_parser("check", help="Check for regressions")
+    regress_check.add_argument("--server", required=True, help="Server name")
+    regress_check.add_argument("--ttft-ms", type=float, required=True, help="Current TTFT ms")
+    regress_check.add_argument("--decode-tps", type=float, required=True, help="Current decode TPS")
+    regress_check.add_argument("--p95-latency-ms", type=float, required=True, help="Current p95 latency ms")
+    regress_check.add_argument("--error-rate", type=float, default=0.0, help="Current error rate")
+    regress_check.add_argument("--availability", type=float, default=100.0, help="Current availability %%")
+    regress_check.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    regress_check.add_argument("--output", default=None, help="Output file")
+    regress_check.set_defaults(func=cmd_regress_check)
 
     # fleet-monitor
     fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")
