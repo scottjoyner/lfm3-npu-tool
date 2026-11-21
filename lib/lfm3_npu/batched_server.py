@@ -54,6 +54,7 @@ from lfm3_npu.rbac import RBACAuth, role_required
 from lfm3_npu.multi_tenancy import TenantManager, extract_tenant_id, TENANT_HEADER, DEFAULT_TENANT_ID
 from lfm3_npu.model_registry import ModelRegistry, get_model_registry, MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY, MODEL_STATUS_PENDING, DEFAULT_MODEL_ID
 from lfm3_npu.api_key_management import KeyManager, generate_api_key, hash_key, get_key_manager, KEY_PREFIX
+from lfm3_npu.alerting import get_alert_manager, ALERT_CRITICAL, ALERT_WARNING
 
 
 # ====================================================================== #
@@ -135,6 +136,14 @@ else:
 # Enterprise: API key management
 _key_manager = KeyManager()
 print(f"{SERVER_NAME}: API key management enabled ({len(_key_manager.list_keys())} key(s))", flush=True)
+
+# Enterprise: alerting
+_alert_manager = get_alert_manager()
+_alert_manager.send_info(
+    f"{SERVER_NAME} server started",
+    source=SERVER_NAME,
+    details={"provider": PROVIDER, "port": SERVER_PORT, "pid": os.getpid()},
+)
 
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
@@ -541,6 +550,11 @@ async def _graceful_shutdown():
     global _shutting_down
     _shutting_down = True
     print(f"{SERVER_NAME}: Graceful shutdown initiated - stopping batch loop...", flush=True)
+    _alert_manager.send_warning(
+        f"{SERVER_NAME} server shutting down",
+        source=SERVER_NAME,
+        details={"provider": PROVIDER, "port": SERVER_PORT},
+    )
     _shutdown_event.set()
     if _batch_task is not None:
         _batch_task.cancel()
@@ -1165,6 +1179,16 @@ async def _chat_completions_impl(
             actor_type="api_key",
             request_id=getattr(request.state, "request_id", None),
         )
+        _alert_manager.send_warning(
+            f"{SERVER_NAME} server overloaded - load shedding active",
+            source=SERVER_NAME,
+            details={
+                "provider": PROVIDER,
+                "port": SERVER_PORT,
+                "active_requests": active_count,
+                "max_active": _load_shed_max_active,
+            },
+        )
         raise HTTPException(
             status_code=503,
             detail="Server overloaded; try again later",
@@ -1336,6 +1360,16 @@ async def _chat_completions_impl(
                 resource="cpu_inference",
                 retry_after=e.retry_after,
                 request_id=request_id,
+            )
+            _alert_manager.send_critical(
+                f"Inference circuit breaker open on {SERVER_NAME}",
+                source=SERVER_NAME,
+                details={
+                    "provider": PROVIDER,
+                    "port": SERVER_PORT,
+                    "retry_after": e.retry_after,
+                    "request_id": request_id,
+                },
             )
             _audit.inference_failed(
                 actor=api_key_hash or client_ip,

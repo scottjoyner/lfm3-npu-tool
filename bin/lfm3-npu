@@ -30,6 +30,7 @@ Commands:
     model           Model versioning / canary routing (list/get/register/canary/promote/rollback/delete)
     security        Automated security scanning (scan --severity --fail-on)
     keys            API key management (list/get/create/update/revoke/rotate/usage)
+    alert           Alert notifications (--test --severity --message --webhook-url)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -499,6 +500,22 @@ def cmd_keys_usage(args) -> int:
     print(f"Total tokens: {data['total_tokens']:,}")
     print(f"Last used: {data['last_used_at'] or 'never'}")
     print(f"Last used IP: {data['last_used_ip'] or 'N/A'}")
+    return 0
+
+
+def cmd_alert(args) -> int:
+    """Send an alert notification."""
+    from lfm3_npu.alerting import AlertManager, Alert
+
+    alerts = AlertManager(slack_webhook_url=args.webhook_url)
+
+    alert = Alert(
+        severity=args.severity,
+        message=args.message,
+        source=args.source,
+    )
+    results = alerts.send(alert)
+    print(f"Alert sent: {results}")
     return 0
 
 
@@ -2007,6 +2024,24 @@ def main() -> int:
     keys_usage = keys_subparsers.add_parser("usage", help="Show key usage statistics")
     keys_usage.add_argument("key_id", help="Key ID")
     keys_usage.set_defaults(func=cmd_keys_usage)
+
+    # alerting
+    alert_parser = subparsers.add_parser("alert", help="Send alert notifications")
+    alert_parser.add_argument("--test", action="store_true", help="Send a test alert")
+    alert_parser.add_argument(
+        "--severity", choices=["info", "warning", "critical"], default="info",
+        help="Alert severity",
+    )
+    alert_parser.add_argument(
+        "--message", default="Test alert from LFM3-1.7B", help="Alert message"
+    )
+    alert_parser.add_argument(
+        "--webhook-url", default=None, help="Slack webhook URL"
+    )
+    alert_parser.add_argument(
+        "--source", default="lfm3-inference", help="Alert source"
+    )
+    alert_parser.set_defaults(func=cmd_alert)
 
     # fleet-monitor
     fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")
