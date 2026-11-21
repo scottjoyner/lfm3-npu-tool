@@ -33,6 +33,7 @@ Commands:
     alert           Alert notifications (--test --severity --message --webhook-url)
     regress         Performance regression detection (baseline/check)
     cost            Cost tracking and billing (calculate/record/report/invoice)
+    rotation        API key rotation management (policy/check/rotate/auto-rotate/history)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -660,6 +661,100 @@ def cmd_cost_invoice(args) -> int:
             print(f"  Total cost:    {invoice['total_cost']:.6f} {invoice['currency']}")
             print(f"  Requests:      {invoice['request_count']:,}")
         print(f"  Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(invoice['generated_at']))}")
+    return 0
+
+
+def cmd_rotation_policy(args) -> int:
+    """Manage rotation policy."""
+    from lfm3_npu.key_rotation import KeyRotationManager, RotationPolicy
+
+    enabled = args.enabled and not args.disabled
+    policy = RotationPolicy(
+        max_age_days=args.max_age_days,
+        max_usage_count=args.max_usage,
+        max_usage_cost=args.max_cost,
+        grace_period_days=args.grace_days,
+        enabled=enabled,
+    )
+    manager = KeyRotationManager()
+    manager.set_policy(policy)
+    print(f"Rotation policy set:")
+    print(f"  Enabled: {policy.enabled}")
+    print(f"  Max age: {policy.max_age_days} days")
+    print(f"  Max usage: {policy.max_usage_count} requests")
+    print(f"  Max cost: ${policy.max_usage_cost:.2f}")
+    print(f"  Grace period: {policy.grace_period_days} days")
+    return 0
+
+
+def cmd_rotation_check(args) -> int:
+    """Check keys for rotation needs."""
+    from lfm3_npu.key_rotation import KeyRotationManager
+
+    manager = KeyRotationManager()
+    if args.key_id:
+        reason = manager.check_key(args.key_id)
+        if reason:
+            print(f"Key {args.key_id} needs rotation: {reason}")
+            return 0
+        else:
+            print(f"Key {args.key_id} does not need rotation")
+            return 0
+    else:
+        results = manager.check_all_keys()
+        if not results:
+            print("No keys need rotation")
+            return 0
+        print(f"Keys needing rotation ({len(results)}):")
+        for r in results:
+            print(f"  {r['key_id']} ({r['role']}): {r['reason']}")
+        return 0
+
+
+def cmd_rotation_rotate(args) -> int:
+    """Rotate a specific key."""
+    from lfm3_npu.key_rotation import KeyRotationManager
+
+    manager = KeyRotationManager()
+    result = manager.rotate_key(args.key_id, reason=args.reason, triggered_by=args.triggered_by)
+    if result is None:
+        print(f"Key {args.key_id} not found or could not be rotated")
+        return 1
+    print(f"Key rotated: {result['old_key_id']} -> {result['key_id']}")
+    print(f"  Reason: {result['reason']}")
+    print(f"  New key: {result['new_key'][:20]}...")
+    print(f"  WARNING: Save this key now - it cannot be retrieved again")
+    return 0
+
+
+def cmd_rotation_auto(args) -> int:
+    """Auto-rotate all keys needing rotation."""
+    from lfm3_npu.key_rotation import KeyRotationManager
+
+    manager = KeyRotationManager()
+    results = manager.auto_rotate_all()
+    if not results:
+        print("No keys needed rotation")
+        return 0
+    print(f"Auto-rotated {len(results)} key(s):")
+    for r in results:
+        print(f"  {r['old_key_id']} -> {r['key_id']} ({r['reason']})")
+    return 0
+
+
+def cmd_rotation_history(args) -> int:
+    """Show rotation history."""
+    from lfm3_npu.key_rotation import KeyRotationManager
+
+    manager = KeyRotationManager()
+    history = manager.get_rotation_history()
+    if not history:
+        print("No rotation history")
+        return 0
+    print(f"Rotation history ({len(history)} entries):")
+    for r in history:
+        rotated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["rotated_at"]))
+        print(f"  {rotated_at}  {r['key_id']}  reason={r['reason']}  triggered_by={r['triggered_by']}")
     return 0
 
 
@@ -2243,6 +2338,36 @@ def main() -> int:
     cost_invoice.add_argument("--period", default=None, help="Billing period YYYY-MM")
     cost_invoice.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
     cost_invoice.set_defaults(func=cmd_cost_invoice)
+
+    # rotation
+    rotation_parser = subparsers.add_parser("rotation", help="API key rotation management")
+    rotation_subparsers = rotation_parser.add_subparsers(dest="rotation_action", help="Rotation action")
+
+    rotation_policy = rotation_subparsers.add_parser("policy", help="Set rotation policy")
+    rotation_policy.add_argument("--set", action="store_true", help="Set rotation policy")
+    rotation_policy.add_argument("--max-age-days", type=int, default=30, help="Max key age in days")
+    rotation_policy.add_argument("--max-usage", type=int, default=100000, help="Max request count")
+    rotation_policy.add_argument("--max-cost", type=float, default=1000.0, help="Max cost in USD")
+    rotation_policy.add_argument("--grace-days", type=int, default=7, help="Grace period in days")
+    rotation_policy.add_argument("--enabled", action="store_true", default=True, help="Enable rotation")
+    rotation_policy.add_argument("--disabled", action="store_true", help="Disable rotation")
+    rotation_policy.set_defaults(func=cmd_rotation_policy)
+
+    rotation_check = rotation_subparsers.add_parser("check", help="Check keys for rotation needs")
+    rotation_check.add_argument("--key-id", default=None, help="Specific key ID (all if omitted)")
+    rotation_check.set_defaults(func=cmd_rotation_check)
+
+    rotation_rotate = rotation_subparsers.add_parser("rotate", help="Rotate a specific key")
+    rotation_rotate.add_argument("key_id", help="Key ID to rotate")
+    rotation_rotate.add_argument("--reason", default="manual", help="Rotation reason")
+    rotation_rotate.add_argument("--triggered-by", default="manual", help="Who triggered rotation")
+    rotation_rotate.set_defaults(func=cmd_rotation_rotate)
+
+    rotation_auto = rotation_subparsers.add_parser("auto-rotate", help="Auto-rotate all keys needing rotation")
+    rotation_auto.set_defaults(func=cmd_rotation_auto)
+
+    rotation_history = rotation_subparsers.add_parser("history", help="Show rotation history")
+    rotation_history.set_defaults(func=cmd_rotation_history)
 
     # fleet-monitor
     fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")
