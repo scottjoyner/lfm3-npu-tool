@@ -34,6 +34,10 @@ Commands:
     regress         Performance regression detection (baseline/check)
     cost            Cost tracking and billing (calculate/record/report/invoice)
     rotation        API key rotation management (policy/check/rotate/auto-rotate/history)
+    promotion       Model promotion pipeline (request/approve/deploy/rollback/list/stage)
+    dr              Disaster recovery (add-region/list-regions/check-health/set-primary/replication/failover/failback/status/history)
+    autoscale       Auto-scaling (evaluate/status/policy/scale-up/scale-down/history)
+    abtest          A/B testing (create/start/complete/list/get/variant/results/analyze/record/promote)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -755,6 +759,508 @@ def cmd_rotation_history(args) -> int:
     for r in history:
         rotated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["rotated_at"]))
         print(f"  {rotated_at}  {r['key_id']}  reason={r['reason']}  triggered_by={r['triggered_by']}")
+    return 0
+
+
+# Model promotion CLI commands
+def cmd_promotion_request(args) -> int:
+    from lfm3_npu.model_registry import MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY
+    from lfm3_npu.model_promotion import get_promotion_pipeline, PromotionStage
+
+    pipeline = get_promotion_pipeline()
+    from_stage = PromotionStage(args.from_stage)
+    to_stage = PromotionStage(args.to_stage)
+    req = pipeline.request_promotion(
+        args.model_version, from_stage, to_stage, args.requested_by,
+        args.notes, args.auto_approve
+    )
+    print(f"Promotion requested: {req.request_id}")
+    print(f"  {req.model_version}: {req.from_stage.value} -> {req.to_stage.value}")
+    print(f"  Status: {req.status.value}")
+    print(f"  Gate results: {req.gate_results}")
+    return 0
+
+
+def cmd_promotion_approve(args) -> int:
+    from lfm3_npu.model_promotion import get_promotion_pipeline
+
+    pipeline = get_promotion_pipeline()
+    req = pipeline.approve_promotion(args.request_id, args.approved_by)
+    if req is None:
+        print(f"Request {args.request_id} not found or not pending")
+        return 1
+    print(f"Promotion {args.request_id} approved by {args.approved_by}")
+    return 0
+
+
+def cmd_promotion_deploy(args) -> int:
+    from lfm3_npu.model_promotion import get_promotion_pipeline
+
+    pipeline = get_promotion_pipeline()
+    req = pipeline.deploy_promotion(args.request_id)
+    if req is None:
+        print(f"Request {args.request_id} not found or not approved")
+        return 1
+    print(f"Promotion {args.request_id} deployed: {req.model_version} -> {req.to_stage.value}")
+    return 0
+
+
+def cmd_promotion_rollback(args) -> int:
+    from lfm3_npu.model_promotion import get_promotion_pipeline
+
+    pipeline = get_promotion_pipeline()
+    req = pipeline.rollback(args.model_version, args.reason)
+    if req is None:
+        print(f"No deployed promotion found for {args.model_version}")
+        return 1
+    print(f"Model {args.model_version} rolled back: {req.reason or 'manual'}")
+    return 0
+
+
+def cmd_promotion_list(args) -> int:
+    from lfm3_npu.model_promotion import get_promotion_pipeline, PromotionStatus
+
+    pipeline = get_promotion_pipeline()
+    status = PromotionStatus(args.status) if args.status else None
+    requests = pipeline.list_requests(args.model_version, status)
+    if not requests:
+        print("No promotion requests found")
+        return 0
+    print(f"Promotion requests ({len(requests)}):")
+    for r in requests:
+        print(f"  {r.request_id}: {r.model_version} {r.from_stage.value} -> {r.to_stage.value} [{r.status.value}]")
+    return 0
+
+
+def cmd_promotion_stage(args) -> int:
+    from lfm3_npu.model_promotion import get_promotion_pipeline
+
+    pipeline = get_promotion_pipeline()
+    if args.model_version:
+        stage = pipeline.get_current_stage(args.model_version)
+        if stage is None:
+            print(f"No stage found for {args.model_version}")
+            return 1
+        print(f"{args.model_version}: {stage.value}")
+    else:
+        stages = pipeline.get_all_stages()
+        if not stages:
+            print("No model versions with stages")
+            return 0
+        print("Current model stages:")
+        for v, s in stages.items():
+            print(f"  {v}: {s}")
+    return 0
+
+
+# Disaster recovery CLI commands
+def cmd_dr_add_region(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    region = dr.add_region(args.name, args.status, args.endpoint)
+    print(f"Region {region.name} added: status={region.status.value}, endpoint={region.endpoint}")
+    return 0
+
+
+def cmd_dr_list_regions(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    regions = dr.list_regions()
+    if not regions:
+        print("No regions configured")
+        return 0
+    print(f"DR Regions ({len(regions)}):")
+    for r in regions:
+        print(f"  {r.name}: {r.status.value} endpoint={r.endpoint} healthy={r.healthy}")
+    return 0
+
+
+def cmd_dr_check_health(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    if args.name:
+        healthy = dr.check_region_health(args.name)
+        region = dr.get_region(args.name)
+        print(f"Region {args.name}: {'healthy' if healthy else 'unhealthy'}")
+        if region and region.last_error:
+            print(f"  Last error: {region.last_error}")
+    else:
+        results = dr.check_all_regions()
+        for name, healthy in results.items():
+            print(f"  {name}: {'healthy' if healthy else 'unhealthy'}")
+    return 0
+
+
+def cmd_dr_set_primary(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    region = dr.set_primary(args.name)
+    if region is None:
+        print(f"Region {args.name} not found")
+        return 1
+    print(f"Region {region.name} set as primary")
+    return 0
+
+
+def cmd_dr_replication(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    models = None
+    config = None
+    keys = None
+    if args.models is not None:
+        models = args.models
+    if args.no_models is not None:
+        models = False
+    if args.config is not None:
+        config = args.config
+    if args.no_config is not None:
+        config = False
+    if args.keys is not None:
+        keys = args.keys
+    if args.no_keys is not None:
+        keys = False
+
+    region = dr.set_replication_state(args.name, models, config, keys)
+    if region is None:
+        print(f"Region {args.name} not found")
+        return 1
+    print(f"Replication state for {region.name}:")
+    print(f"  Models: {region.models_replicated}")
+    print(f"  Config: {region.config_replicated}")
+    print(f"  Keys: {region.keys_replicated}")
+    return 0
+
+
+def cmd_dr_failover(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    try:
+        event = dr.failover(args.name, args.reason)
+        print(f"Failover {event.event_id}: {event.from_region} -> {event.to_region}")
+        print(f"  Status: {event.status.value}")
+        print(f"  Reason: {event.reason}")
+    except Exception as e:
+        print(f"Failover failed: {e}")
+        return 1
+    return 0
+
+
+def cmd_dr_failback(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    try:
+        event = dr.failback(args.name)
+        print(f"Failback {event.event_id}: {event.from_region} -> {event.to_region}")
+        print(f"  Status: {event.status.value}")
+    except Exception as e:
+        print(f"Failback failed: {e}")
+        return 1
+    return 0
+
+
+def cmd_dr_status(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    status = dr.get_status()
+    print(f"DR Status:")
+    print(f"  Primary: {status['primary']} (healthy: {status['primary_healthy']})")
+    print(f"  Secondaries: {', '.join(status['secondaries']) if status['secondaries'] else 'none'}")
+    print(f"  Ready secondaries: {', '.join(status['ready_secondaries']) if status['ready_secondaries'] else 'none'}")
+    if status["current_failover"]:
+        cf = status["current_failover"]
+        print(f"  Current failover: {cf['from_region']} -> {cf['to_region']} [{cf['status']}]")
+    print(f"  Total failovers: {status['total_failovers']}")
+    return 0
+
+
+def cmd_dr_history(args) -> int:
+    from lfm3_npu.disaster_recovery import DisasterRecoveryManager
+
+    dr = DisasterRecoveryManager()
+    history = dr.get_failover_history()
+    if not history:
+        print("No failover history")
+        return 0
+    print(f"Failover history ({len(history)} events):")
+    for e in history:
+        started = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(e["started_at"]))
+        completed = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(e["completed_at"]))
+            if e["completed_at"] else "N/A"
+        )
+        print(f"  {started} -> {completed}  {e['from_region']} -> {e['to_region']} [{e['status']}] reason={e['reason']}")
+    return 0
+
+
+# Auto-scaler CLI commands
+def cmd_autoscaler_evaluate(args) -> int:
+    from lfm3_npu.auto_scaler import AutoScaler
+
+    scaler = AutoScaler()
+    decision = scaler.evaluate()
+    print(f"Scaling decision: {decision.action.value}")
+    print(f"  Current replicas: {decision.current_replicas}")
+    print(f"  Target replicas: {decision.target_replicas}")
+    print(f"  Reason: {decision.reason}")
+    print(f"  Metrics:")
+    print(f"    CPU: {decision.metrics.cpu_percent:.1f}%")
+    print(f"    Memory: {decision.metrics.memory_percent:.1f}%")
+    print(f"    Queue depth: {decision.metrics.queue_depth}")
+    print(f"    P95 latency: {decision.metrics.latency_p95_ms:.0f}ms")
+    print(f"    Error rate: {decision.metrics.error_rate:.1%}")
+    return 0
+
+
+def cmd_autoscaler_status(args) -> int:
+    from lfm3_npu.auto_scaler import AutoScaler
+
+    scaler = AutoScaler()
+    status = scaler.get_status()
+    print(f"Auto-Scaler Status:")
+    print(f"  Current replicas: {status['current_replicas']}")
+    print(f"  Min replicas: {status['min_replicas']}")
+    print(f"  Max replicas: {status['max_replicas']}")
+    print(f"  Policy:")
+    print(f"    Target CPU: {status['policy']['target_cpu_percent']}%")
+    print(f"    Target Memory: {status['policy']['target_memory_percent']}%")
+    print(f"    Target queue depth: {status['policy']['target_queue_depth']}")
+    print(f"    Target P95 latency: {status['policy']['target_latency_p95_ms']}ms")
+    print(f"    Max error rate: {status['policy']['max_error_rate']:.1%}")
+    if status["last_scale_up"]:
+        print(f"  Last scale up: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(status['last_scale_up']))}")
+    if status["last_scale_down"]:
+        print(f"  Last scale down: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(status['last_scale_down']))}")
+    return 0
+
+
+def cmd_autoscaler_policy(args) -> int:
+    from lfm3_npu.auto_scaler import AutoScaler, ScalingPolicy
+
+    scaler = AutoScaler()
+    policy = scaler.get_policy()
+    if args.min_replicas is not None:
+        policy.min_replicas = args.min_replicas
+    if args.max_replicas is not None:
+        policy.max_replicas = args.max_replicas
+    if args.target_cpu is not None:
+        policy.target_cpu_percent = args.target_cpu
+    if args.target_memory is not None:
+        policy.target_memory_percent = args.target_memory
+    if args.target_queue is not None:
+        policy.target_queue_depth = args.target_queue
+    if args.target_latency is not None:
+        policy.target_latency_p95_ms = args.target_latency
+    if args.max_error_rate is not None:
+        policy.max_error_rate = args.max_error_rate
+    scaler.set_policy(policy)
+    print(f"Scaling policy updated:")
+    print(f"  Min replicas: {policy.min_replicas}")
+    print(f"  Max replicas: {policy.max_replicas}")
+    print(f"  Target CPU: {policy.target_cpu_percent}%")
+    print(f"  Target Memory: {policy.target_memory_percent}%")
+    print(f"  Target queue depth: {policy.target_queue_depth}")
+    print(f"  Target P95 latency: {policy.target_latency_p95_ms}ms")
+    print(f"  Max error rate: {policy.max_error_rate:.1%}")
+    return 0
+
+
+def cmd_autoscaler_scale_up(args) -> int:
+    from lfm3_npu.auto_scaler import AutoScaler
+
+    scaler = AutoScaler()
+    replicas = scaler.scale_up()
+    print(f"Scaled up to {replicas} replicas")
+    return 0
+
+
+def cmd_autoscaler_scale_down(args) -> int:
+    from lfm3_npu.auto_scaler import AutoScaler
+
+    scaler = AutoScaler()
+    replicas = scaler.scale_down()
+    print(f"Scaled down to {replicas} replicas")
+    return 0
+
+
+def cmd_autoscaler_history(args) -> int:
+    from lfm3_npu.auto_scaler import AutoScaler
+
+    scaler = AutoScaler()
+    history = scaler.get_scaling_history(args.limit)
+    if not history:
+        print("No scaling history")
+        return 0
+    print(f"Scaling history ({len(history)} entries):")
+    for d in history:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(d["timestamp"]))
+        print(f"  {ts}  {d['action']}  {d['current_replicas']}->{d['target_replicas']}  {d['reason']}")
+    return 0
+
+
+# A/B testing CLI commands
+def cmd_abtest_create(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    try:
+        test = manager.create_test(
+            args.test_id, args.name, args.control_model, args.treatment_model,
+            args.traffic_split, args.description
+        )
+        print(f"A/B test created: {test.test_id}")
+        print(f"  Control: {test.variants[0].model_version} ({test.variants[0].traffic_weight*100:.0f}%)")
+        print(f"  Treatment: {test.variants[1].model_version} ({test.variants[1].traffic_weight*100:.0f}%)")
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+    return 0
+
+
+def cmd_abtest_start(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    test = manager.start_test(args.test_id)
+    if test is None:
+        print(f"Test {args.test_id} not found or not in draft status")
+        return 1
+    print(f"A/B test {args.test_id} started")
+    return 0
+
+
+def cmd_abtest_complete(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    test = manager.complete_test(args.test_id, args.winner)
+    if test is None:
+        print(f"Test {args.test_id} not found")
+        return 1
+    print(f"A/B test {args.test_id} completed")
+    if args.winner:
+        print(f"  Winner: {args.winner}")
+    return 0
+
+
+def cmd_abtest_list(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    tests = manager.list_tests()
+    if not tests:
+        print("No A/B tests found")
+        return 0
+    print(f"A/B tests ({len(tests)}):")
+    for t in tests:
+        print(f"  {t.test_id}: {t.name} [{t.status.value}]")
+    return 0
+
+
+def cmd_abtest_get(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    test = manager.get_test(args.test_id)
+    if test is None:
+        print(f"Test {args.test_id} not found")
+        return 1
+    print(f"Test: {test.test_id}")
+    print(f"  Name: {test.name}")
+    print(f"  Status: {test.status.value}")
+    print(f"  Description: {test.description or 'N/A'}")
+    print(f"  Variants:")
+    for v in test.variants:
+        print(f"    {v.variant_id}: {v.model_version} ({v.traffic_weight*100:.0f}%)")
+    return 0
+
+
+def cmd_abtest_variant(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    variant = manager.get_variant_for_user(args.test_id, args.user_id)
+    if variant is None:
+        print(f"No variant found for {args.user_id} in test {args.test_id}")
+        return 1
+    print(f"Variant: {variant.variant_id} ({variant.name})")
+    print(f"  Model: {variant.model_version}")
+    return 0
+
+
+def cmd_abtest_results(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    results = manager.get_results(args.test_id)
+    if not results:
+        print(f"No results for test {args.test_id}")
+        return 0
+    print(f"Results for test {args.test_id}:")
+    for r in results:
+        print(f"  {r.variant_id} ({r.variant_name}):")
+        print(f"    Requests: {r.request_count}")
+        print(f"    Conversions: {r.conversion_count} ({r.conversion_rate:.2%})")
+        print(f"    Avg latency: {r.avg_latency_ms:.0f}ms")
+        print(f"    Error rate: {r.error_rate:.1%}")
+        print(f"    Total cost: {r.total_cost:.6f}")
+    return 0
+
+
+def cmd_abtest_analyze(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    analysis = manager.analyze_test(args.test_id)
+    if "error" in analysis:
+        print(f"Error: {analysis['error']}")
+        return 1
+    print(f"A/B Test Analysis: {analysis['test_name']}")
+    print(f"  Status: {analysis['status']}")
+    print(f"  Control conversion: {analysis['control']['conversion_rate']:.2%}")
+    print(f"  Treatment conversion: {analysis['treatment']['conversion_rate']:.2%}")
+    print(f"  Conversion lift: {analysis['conversion_lift_percent']:+.2f}%")
+    print(f"  Latency change: {analysis['latency_change_percent']:+.2f}%")
+    print(f"  Cost change: {analysis['cost_change_percent']:+.2f}%")
+    print(f"  Statistically significant: {analysis['statistically_significant']}")
+    print(f"  Recommendation: {analysis['recommendation']}")
+    return 0
+
+
+def cmd_abtest_record(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    manager.record_variant_metric(
+        args.test_id, args.variant_id,
+        request_count=args.requests,
+        conversion_count=args.conversions,
+        latency_ms=args.latency,
+        error_count=args.errors,
+        tokens=args.tokens,
+        cost=args.cost,
+    )
+    print(f"Recorded metrics for {args.variant_id} in {args.test_id}")
+    return 0
+
+
+def cmd_abtest_promote(args) -> int:
+    from lfm3_npu.ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+    model_version = manager.promote_winner(args.test_id)
+    if model_version is None:
+        print(f"Cannot promote winner for {args.test_id}")
+        return 1
+    print(f"Promoted winner model: {model_version}")
     return 0
 
 
@@ -2368,6 +2874,175 @@ def main() -> int:
 
     rotation_history = rotation_subparsers.add_parser("history", help="Show rotation history")
     rotation_history.set_defaults(func=cmd_rotation_history)
+
+    # model promotion
+    promotion_parser = subparsers.add_parser("promotion", help="Model versioning / canary promotion pipeline")
+    promotion_subparsers = promotion_parser.add_subparsers(dest="promotion_action", help="Promotion action")
+
+    promotion_request = promotion_subparsers.add_parser("request", help="Request a model promotion")
+    promotion_request.add_argument("--model-version", required=True, help="Model version")
+    promotion_request.add_argument("--from-stage", required=True, choices=["staging", "canary", "production"], help="From stage")
+    promotion_request.add_argument("--to-stage", required=True, choices=["staging", "canary", "production"], help="To stage")
+    promotion_request.add_argument("--requested-by", default="cli", help="Requester name")
+    promotion_request.add_argument("--notes", default=None, help="Notes")
+    promotion_request.add_argument("--auto-approve", action="store_true", help="Auto-approve if gates pass")
+    promotion_request.set_defaults(func=cmd_promotion_request)
+
+    promotion_approve = promotion_subparsers.add_parser("approve", help="Approve a promotion request")
+    promotion_approve.add_argument("request_id", help="Promotion request ID")
+    promotion_approve.add_argument("--approved-by", default="cli", help="Approver name")
+    promotion_approve.set_defaults(func=cmd_promotion_approve)
+
+    promotion_deploy = promotion_subparsers.add_parser("deploy", help="Deploy an approved promotion")
+    promotion_deploy.add_argument("request_id", help="Promotion request ID")
+    promotion_deploy.set_defaults(func=cmd_promotion_deploy)
+
+    promotion_rollback = promotion_subparsers.add_parser("rollback", help="Rollback a model version")
+    promotion_rollback.add_argument("model_version", help="Model version")
+    promotion_rollback.add_argument("--reason", default="manual", help="Rollback reason")
+    promotion_rollback.set_defaults(func=cmd_promotion_rollback)
+
+    promotion_list = promotion_subparsers.add_parser("list", help="List promotion requests")
+    promotion_list.add_argument("--model-version", default=None, help="Filter by model version")
+    promotion_list.add_argument("--status", default=None, choices=["pending", "approved", "rejected", "deployed", "rolled_back", "failed"], help="Filter by status")
+    promotion_list.set_defaults(func=cmd_promotion_list)
+
+    promotion_stage = promotion_subparsers.add_parser("stage", help="Show current stage for a model version")
+    promotion_stage.add_argument("model_version", nargs="?", default=None, help="Model version (all if omitted)")
+    promotion_stage.set_defaults(func=cmd_promotion_stage)
+
+    # disaster recovery
+    dr_parser = subparsers.add_parser("dr", help="Multi-region disaster recovery")
+    dr_subparsers = dr_parser.add_subparsers(dest="dr_action", help="DR action")
+
+    dr_add_region = dr_subparsers.add_parser("add-region", help="Add a DR region")
+    dr_add_region.add_argument("name", help="Region name")
+    dr_add_region.add_argument("--status", default="secondary", choices=["primary", "secondary"], help="Region status")
+    dr_add_region.add_argument("--endpoint", default=None, help="Region health endpoint URL")
+    dr_add_region.set_defaults(func=cmd_dr_add_region)
+
+    dr_list_regions = dr_subparsers.add_parser("list-regions", help="List DR regions")
+    dr_list_regions.set_defaults(func=cmd_dr_list_regions)
+
+    dr_check_health = dr_subparsers.add_parser("check-health", help="Check region health")
+    dr_check_health.add_argument("name", nargs="?", default=None, help="Region name (all if omitted)")
+    dr_check_health.set_defaults(func=cmd_dr_check_health)
+
+    dr_set_primary = dr_subparsers.add_parser("set-primary", help="Set primary region")
+    dr_set_primary.add_argument("name", help="Region name")
+    dr_set_primary.set_defaults(func=cmd_dr_set_primary)
+
+    dr_replication = dr_subparsers.add_parser("replication", help="Set replication state")
+    dr_replication.add_argument("name", help="Region name")
+    dr_replication.add_argument("--models", action="store_true", default=None, help="Models replicated")
+    dr_replication.add_argument("--no-models", action="store_true", default=None, help="Models not replicated")
+    dr_replication.add_argument("--config", action="store_true", default=None, help="Config replicated")
+    dr_replication.add_argument("--no-config", action="store_true", default=None, help="Config not replicated")
+    dr_replication.add_argument("--keys", action="store_true", default=None, help="Keys replicated")
+    dr_replication.add_argument("--no-keys", action="store_true", default=None, help="Keys not replicated")
+    dr_replication.set_defaults(func=cmd_dr_replication)
+
+    dr_failover = dr_subparsers.add_parser("failover", help="Failover to a region")
+    dr_failover.add_argument("name", help="Target region name")
+    dr_failover.add_argument("--reason", default="manual", help="Failover reason")
+    dr_failover.set_defaults(func=cmd_dr_failover)
+
+    dr_failback = dr_subparsers.add_parser("failback", help="Fail back to a region")
+    dr_failback.add_argument("name", help="Target region name")
+    dr_failback.set_defaults(func=cmd_dr_failback)
+
+    dr_status = dr_subparsers.add_parser("status", help="Show DR status")
+    dr_status.set_defaults(func=cmd_dr_status)
+
+    dr_history = dr_subparsers.add_parser("history", help="Show failover history")
+    dr_history.set_defaults(func=cmd_dr_history)
+
+    # auto-scaler
+    autoscaler_parser = subparsers.add_parser("autoscale", help="Auto-scaling management")
+    autoscaler_subparsers = autoscaler_parser.add_subparsers(dest="autoscaler_action", help="Auto-scaler action")
+
+    autoscaler_evaluate = autoscaler_subparsers.add_parser("evaluate", help="Evaluate scaling metrics")
+    autoscaler_evaluate.set_defaults(func=cmd_autoscaler_evaluate)
+
+    autoscaler_status = autoscaler_subparsers.add_parser("status", help="Show auto-scaler status")
+    autoscaler_status.set_defaults(func=cmd_autoscaler_status)
+
+    autoscaler_policy = autoscaler_subparsers.add_parser("policy", help="Set scaling policy")
+    autoscaler_policy.add_argument("--min-replicas", type=int, default=None, help="Min replicas")
+    autoscaler_policy.add_argument("--max-replicas", type=int, default=None, help="Max replicas")
+    autoscaler_policy.add_argument("--target-cpu", type=float, default=None, help="Target CPU %%")
+    autoscaler_policy.add_argument("--target-memory", type=float, default=None, help="Target memory %%")
+    autoscaler_policy.add_argument("--target-queue", type=int, default=None, help="Target queue depth")
+    autoscaler_policy.add_argument("--target-latency", type=float, default=None, help="Target P95 latency ms")
+    autoscaler_policy.add_argument("--max-error-rate", type=float, default=None, help="Max error rate")
+    autoscaler_policy.set_defaults(func=cmd_autoscaler_policy)
+
+    autoscaler_scale_up = autoscaler_subparsers.add_parser("scale-up", help="Manually scale up")
+    autoscaler_scale_up.set_defaults(func=cmd_autoscaler_scale_up)
+
+    autoscaler_scale_down = autoscaler_subparsers.add_parser("scale-down", help="Manually scale down")
+    autoscaler_scale_down.set_defaults(func=cmd_autoscaler_scale_down)
+
+    autoscaler_history = autoscaler_subparsers.add_parser("history", help="Show scaling history")
+    autoscaler_history.add_argument("--limit", type=int, default=50, help="Number of entries")
+    autoscaler_history.set_defaults(func=cmd_autoscaler_history)
+
+    # A/B testing
+    abtest_parser = subparsers.add_parser("abtest", help="A/B testing management")
+    abtest_subparsers = abtest_parser.add_subparsers(dest="abtest_action", help="A/B test action")
+
+    abtest_create = abtest_subparsers.add_parser("create", help="Create an A/B test")
+    abtest_create.add_argument("test_id", help="Test ID")
+    abtest_create.add_argument("name", help="Test name")
+    abtest_create.add_argument("control_model", help="Control model version")
+    abtest_create.add_argument("treatment_model", help="Treatment model version")
+    abtest_create.add_argument("--traffic-split", type=float, default=0.1, help="Traffic split for treatment (0-1)")
+    abtest_create.add_argument("--description", default=None, help="Test description")
+    abtest_create.set_defaults(func=cmd_abtest_create)
+
+    abtest_start = abtest_subparsers.add_parser("start", help="Start an A/B test")
+    abtest_start.add_argument("test_id", help="Test ID")
+    abtest_start.set_defaults(func=cmd_abtest_start)
+
+    abtest_complete = abtest_subparsers.add_parser("complete", help="Complete an A/B test")
+    abtest_complete.add_argument("test_id", help="Test ID")
+    abtest_complete.add_argument("--winner", default=None, help="Winning variant ID")
+    abtest_complete.set_defaults(func=cmd_abtest_complete)
+
+    abtest_list = abtest_subparsers.add_parser("list", help="List A/B tests")
+    abtest_list.set_defaults(func=cmd_abtest_list)
+
+    abtest_get = abtest_subparsers.add_parser("get", help="Get test details")
+    abtest_get.add_argument("test_id", help="Test ID")
+    abtest_get.set_defaults(func=cmd_abtest_get)
+
+    abtest_variant = abtest_subparsers.add_parser("variant", help="Get variant for user/request")
+    abtest_variant.add_argument("test_id", help="Test ID")
+    abtest_variant.add_argument("user_id", help="User ID or request ID")
+    abtest_variant.set_defaults(func=cmd_abtest_variant)
+
+    abtest_results = abtest_subparsers.add_parser("results", help="Get test results")
+    abtest_results.add_argument("test_id", help="Test ID")
+    abtest_results.set_defaults(func=cmd_abtest_results)
+
+    abtest_analyze = abtest_subparsers.add_parser("analyze", help="Analyze test results")
+    abtest_analyze.add_argument("test_id", help="Test ID")
+    abtest_analyze.set_defaults(func=cmd_abtest_analyze)
+
+    abtest_record = abtest_subparsers.add_parser("record", help="Record variant metrics")
+    abtest_record.add_argument("test_id", help="Test ID")
+    abtest_record.add_argument("variant_id", help="Variant ID")
+    abtest_record.add_argument("--requests", type=int, default=1, help="Request count")
+    abtest_record.add_argument("--conversions", type=int, default=0, help="Conversion count")
+    abtest_record.add_argument("--latency", type=float, default=0.0, help="Latency ms")
+    abtest_record.add_argument("--errors", type=int, default=0, help="Error count")
+    abtest_record.add_argument("--tokens", type=int, default=0, help="Token count")
+    abtest_record.add_argument("--cost", type=float, default=0.0, help="Cost")
+    abtest_record.set_defaults(func=cmd_abtest_record)
+
+    abtest_promote = abtest_subparsers.add_parser("promote", help="Promote test winner")
+    abtest_promote.add_argument("test_id", help="Test ID")
+    abtest_promote.set_defaults(func=cmd_abtest_promote)
 
     # fleet-monitor
     fleet_parser = subparsers.add_parser("fleet-monitor", help="Fleet monitoring across servers")
