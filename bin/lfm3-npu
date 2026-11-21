@@ -25,6 +25,7 @@ Commands:
     benchmark-cron  Run benchmark cron job (periodic performance validation)
     validate        Run startup validation of all LFM3 services
     recover         Recover all LFM3 servers (stop, start, wait for health)
+    lb              Load balancer with health-based failover (start/status/stop)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -1830,6 +1831,27 @@ def main() -> int:
     audit_parser.add_argument("--limit", type=int, default=50, help="Max entries to show")
     audit_parser.set_defaults(func=cmd_audit)
 
+    # ------------------------------------------------------------------
+    # Load balancer subcommand
+    # ------------------------------------------------------------------
+    lb_parser = subparsers.add_parser("lb", help="Load balancer with health-based failover")
+    lb_subparsers = lb_parser.add_subparsers(dest="lb_action", help="Load balancer action")
+
+    lb_start = lb_subparsers.add_parser("start", help="Start load balancer")
+    lb_start.add_argument("--port", type=int, default=1240, help="Listen port")
+    lb_start.add_argument("--host", default="0.0.0.0", help="Listen host")
+    lb_start.add_argument("--primary", default="npu", choices=["cpu", "npu"], help="Primary backend")
+    lb_start.add_argument("--secondary", default="cpu", choices=["cpu", "npu"], help="Secondary backend")
+    lb_start.add_argument("--health-interval", type=float, default=5.0, help="Health check interval (s)")
+    lb_start.set_defaults(func=cmd_lb_start)
+
+    lb_status = lb_subparsers.add_parser("status", help="Show load balancer status")
+    lb_status.add_argument("--port", type=int, default=1240, help="Load balancer port")
+    lb_status.set_defaults(func=cmd_lb_status)
+
+    lb_stop = lb_subparsers.add_parser("stop", help="Stop load balancer")
+    lb_stop.set_defaults(func=cmd_lb_stop)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1837,6 +1859,82 @@ def main() -> int:
         return 1
 
     return args.func(args)
+
+
+def cmd_lb_start(args) -> int:
+    """Start the load balancer."""
+    import subprocess
+    import os as _os
+
+    env = dict(_os.environ)
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib") + (
+        f":{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else ""
+    )
+
+    cmd = [
+        sys.executable, "-m", "lfm3_npu.load_balancer",
+        "--port", str(args.port),
+        "--host", args.host,
+        "--primary", args.primary,
+        "--secondary", args.secondary,
+        "--health-interval", str(args.health_interval),
+    ]
+
+    log_path = os.path.join(SERVER_DIR, "logs", "load_balancer.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    with open(log_path, "a") as logf:
+        proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT)
+
+    print(f"Load balancer started (PID {proc.pid}) on {args.host}:{args.port}")
+    print(f"  Primary: {args.primary}  Secondary: {args.secondary}")
+    print(f"  Log: {log_path}")
+    print(f"  Wait a few seconds for health checks, then: lfm3-npu lb status --port {args.port}")
+    return 0
+
+
+def cmd_lb_status(args) -> int:
+    """Show load balancer status."""
+    import urllib.request
+    import json
+
+    url = f"http://127.0.0.1:{args.port}/health"
+    try:
+        data = json.loads(urllib.request.urlopen(url, timeout=5).read().decode("utf-8"))
+    except Exception as e:
+        print(f"Cannot reach load balancer at {url}: {e}")
+        print(f"  Start it with: lfm3-npu lb start --port {args.port}")
+        return 1
+
+    print(f"Load balancer status: {data['status']}")
+    print(f"  Primary: {data['primary']}  Secondary: {data['secondary']}")
+    print(f"  Uptime: {data.get('uptime_seconds', 0):.1f}s")
+    print()
+    for name, b in data.get("backends", {}).items():
+        status_str = "HEALTHY" if b["healthy"] else "UNHEALTHY"
+        print(f"  {name}: {status_str}")
+        print(f"    URL: {b['url']}")
+        print(f"    Failures: {b['consecutive_failures']}  Successes: {b['consecutive_successes']}")
+        print(f"    Requests: {b['total_requests']}  Errors: {b['total_errors']}")
+        print(f"    Avg latency: {b['avg_latency_ms']}ms  Error rate: {b['error_rate']}")
+        if b["last_error"]:
+            print(f"    Last error: {b['last_error']}")
+    return 0
+
+
+def cmd_lb_stop(args) -> int:
+    """Stop the load balancer."""
+    import subprocess
+
+    result = subprocess.run(
+        ["pkill", "-f", "lfm3_npu.load_balancer"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print("Load balancer stopped")
+    else:
+        print("No load balancer process found")
+    return 0
 
 
 if __name__ == "__main__":
