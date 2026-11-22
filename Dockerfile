@@ -25,7 +25,8 @@ ENV PYTHONPATH=/media/scott/data/lfm3-npu-tool/lib
 COPY . /media/scott/data/lfm3-npu-tool/
 
 # Install Python dependencies
-RUN pip3 install fastapi uvicorn onnxruntime tokenizers numpy pydantic pyyaml psutil
+RUN pip3 install --upgrade pip && pip3 install -r /media/scott/data/lfm3-npu-tool/requirements.txt || \
+    pip3 install fastapi uvicorn onnxruntime tokenizers numpy pydantic pyyaml psutil
 
 # Copy FLM binary and NPU engine (built separately on host)
 # These must be present at /tmp/flm and /tmp/lib/liblfm3_npu.so before building
