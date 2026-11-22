@@ -22,11 +22,12 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pyyaml psutil streamlit
+          python3 -m pip install -r requirements.txt || \
+            python3 -m pip install pytest pyyaml psutil streamlit
 
       - name: Run unit tests
         run: |
-          python3 -m pytest tests/test_tooling.py -v
+          python3 -m pytest tests/test_tooling.py tests/test_new_modules.py -v
 
   lint:
     runs-on: ubuntu-latest
@@ -121,11 +122,12 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pyyaml psutil streamlit
+          python3 -m pip install -r requirements.txt || \
+            python3 -m pip install pytest pyyaml psutil streamlit
 
       - name: Run CI test suite (CPU-only)
         run: |
-          python3 scripts/ci_test.py
+          python3 -m pytest tests/test_tooling.py tests/test_new_modules.py -v
 
   # NPU integration tests (requires NPU hardware - self-hosted runner)
   integration-npu:
@@ -144,7 +146,8 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pyyaml psutil streamlit
+          python3 -m pip install -r requirements.txt || \
+            python3 -m pip install pytest pyyaml psutil streamlit
 
       - name: Run CI test suite
         run: |
