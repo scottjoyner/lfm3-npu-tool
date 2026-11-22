@@ -1,0 +1,34 @@
+# LFM3-1.7B NPU Inference Tooling - Python Dependencies
+
+# Core web framework
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP client
+httpx>=0.24.0
+requests>=2.31.0
+
+# Configuration & validation
+pyyaml>=6.0
+watchdog>=3.0.0
+
+# Observability
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-jaeger>=1.20.0
+prometheus-client>=0.17.0
+
+# System metrics
+psutil>=5.9.0
+
+# TLS / security
+cryptography>=41.0.0
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# CLI
+typing-extensions>=4.0.0

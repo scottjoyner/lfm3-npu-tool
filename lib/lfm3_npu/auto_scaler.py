@@ -315,6 +315,7 @@ class AutoScaler:
             return self._current_replicas
         self._current_replicas += 1
         self._last_scale_up = time.time()
+        self._record_manual_scale(ScalingAction.SCALE_UP, "manual scale-up")
         self._save()
         return self._current_replicas
 
@@ -324,8 +325,23 @@ class AutoScaler:
             return self._current_replicas
         self._current_replicas -= 1
         self._last_scale_down = time.time()
+        self._record_manual_scale(ScalingAction.SCALE_DOWN, "manual scale-down")
         self._save()
         return self._current_replicas
+
+    def _record_manual_scale(self, action: ScalingAction, reason: str) -> None:
+        """Record a manual scaling operation in history."""
+        metrics = ScalingMetrics(active_replicas=self._current_replicas)
+        decision = ScalingDecision(
+            action=action,
+            current_replicas=self._current_replicas,
+            target_replicas=self._current_replicas,
+            reason=reason,
+            metrics=metrics,
+        )
+        self._scaling_history.append(decision)
+        if len(self._scaling_history) > 1000:
+            self._scaling_history = self._scaling_history[-1000:]
 
     # ------------------------------------------------------------------ #
     # Queries                                                            #
