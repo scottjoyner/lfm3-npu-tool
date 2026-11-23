@@ -170,6 +170,73 @@ class LoadShedModel(BaseModel):
     max_active_requests: int = Field(default=100, ge=1)
 
 
+class ModelPromotionModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/promotion.json")
+    auto_approve: bool = Field(default=False)
+    stages: List[str] = Field(default_factory=lambda: ["staging", "canary", "production"])
+
+
+class DRRegionModel(BaseModel):
+    name: str
+    status: str = Field(default="secondary")
+    endpoint: Optional[str] = None
+
+
+class DisasterRecoveryModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/dr.json")
+    regions: List[DRRegionModel] = Field(default_factory=list)
+
+
+class AutoScalingModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/autoscaler.json")
+    min_replicas: int = Field(default=1, ge=1)
+    max_replicas: int = Field(default=10, ge=1)
+    target_cpu_percent: float = Field(default=70.0, ge=0.0, le=100.0)
+    target_memory_percent: float = Field(default=80.0, ge=0.0, le=100.0)
+    target_queue_depth: int = Field(default=10, ge=0)
+    target_latency_p95_ms: float = Field(default=1000.0, ge=0.0)
+    max_error_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    scale_up_cooldown_seconds: int = Field(default=60, ge=0)
+    scale_down_cooldown_seconds: int = Field(default=300, ge=0)
+    evaluation_interval_seconds: int = Field(default=30, ge=1)
+
+
+class ABTestingModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/ab_tests.json")
+
+
+class CostTrackingModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/cost_tracking.json")
+    default_tier: str = Field(default="standard")
+    pricing_tiers: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+
+
+class AlertingModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/alerts.json")
+    webhook_url: str = Field(default="")
+    slack_webhook: str = Field(default="")
+    pagerduty_key: str = Field(default="")
+    severity_levels: List[str] = Field(default_factory=lambda: ["info", "warning", "critical"])
+
+
+class SecurityScanModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/security_scan.json")
+    scan_paths: List[str] = Field(default_factory=list)
+    exclude_paths: List[str] = Field(default_factory=list)
+
+
+class KeyRotationPolicyModel(BaseModel):
+    name: str
+    max_age_days: Optional[int] = None
+    max_usage_count: Optional[int] = None
+    max_cost_usd: Optional[float] = None
+
+
+class KeyRotationModel(BaseModel):
+    storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/key_rotation.json")
+    policies: List[KeyRotationPolicyModel] = Field(default_factory=list)
+
+
 class ConfigSchema(BaseModel):
     """Complete configuration schema."""
 
@@ -185,6 +252,14 @@ class ConfigSchema(BaseModel):
     audit: AuditModel = Field(default_factory=AuditModel)
     load_shed: LoadShedModel = Field(default_factory=LoadShedModel)
     performance: PerformanceModel = Field(default_factory=PerformanceModel)
+    model_promotion: ModelPromotionModel = Field(default_factory=ModelPromotionModel)
+    disaster_recovery: DisasterRecoveryModel = Field(default_factory=DisasterRecoveryModel)
+    auto_scaling: AutoScalingModel = Field(default_factory=AutoScalingModel)
+    ab_testing: ABTestingModel = Field(default_factory=ABTestingModel)
+    cost_tracking: CostTrackingModel = Field(default_factory=CostTrackingModel)
+    alerting: AlertingModel = Field(default_factory=AlertingModel)
+    security_scan: SecurityScanModel = Field(default_factory=SecurityScanModel)
+    key_rotation: KeyRotationModel = Field(default_factory=KeyRotationModel)
 
     @model_validator(mode="after")
     def _validate_server_ports(self) -> "ConfigSchema":

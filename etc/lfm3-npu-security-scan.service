@@ -1,0 +1,11 @@
+[Unit]
+Description=LFM3-1.7B Automated Security Scan
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/bin/lfm3-npu security scan --report-format json
+WorkingDirectory=/media/scott/data/lfm3-npu-tool
+Environment=PYTHONPATH=/media/scott/data/lfm3-npu-tool/lib
+
+[Install]
+WantedBy=default.target

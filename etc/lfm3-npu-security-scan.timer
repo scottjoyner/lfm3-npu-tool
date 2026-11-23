@@ -1,0 +1,10 @@
+[Unit]
+Description=LFM3-1.7B Automated Security Scan Timer
+Requires=lfm3-npu-security-scan.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=LFM3-1.7B Disaster Recovery Health Check Timer
+Requires=lfm3-npu-dr-health.service
+
+[Timer]
+OnCalendar=*:*/1
+Persistent=true
+
+[Install]
+WantedBy=timers.target

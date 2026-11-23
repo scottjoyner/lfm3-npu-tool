@@ -1,0 +1,12 @@
+[Unit]
+Description=LFM3-1.7B Auto-Scaler Evaluation
+After=lfm3-npu-npu.service lfm3-npu-cpu.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /media/scott/data/lfm3-npu-tool/bin/lfm3-npu autoscale evaluate
+WorkingDirectory=/media/scott/data/lfm3-npu-tool
+Environment=PYTHONPATH=/media/scott/data/lfm3-npu-tool/lib
+
+[Install]
+WantedBy=default.target

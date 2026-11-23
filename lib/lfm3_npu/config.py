@@ -108,6 +108,62 @@ DEFAULTS: Dict[str, Any] = {
             "batch_timeout_ms": 50,
         },
     },
+    "model_promotion": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/promotion.json",
+        "auto_approve": False,
+        "stages": ["staging", "canary", "production"],
+    },
+    "disaster_recovery": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/dr.json",
+        "regions": [
+            {"name": "primary", "status": "primary", "endpoint": "http://localhost:1239"},
+            {"name": "secondary", "status": "secondary", "endpoint": "http://localhost:1240"},
+        ],
+    },
+    "auto_scaling": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/autoscaler.json",
+        "min_replicas": 1,
+        "max_replicas": 10,
+        "target_cpu_percent": 70.0,
+        "target_memory_percent": 80.0,
+        "target_queue_depth": 10,
+        "target_latency_p95_ms": 1000.0,
+        "max_error_rate": 0.05,
+        "scale_up_cooldown_seconds": 60,
+        "scale_down_cooldown_seconds": 300,
+        "evaluation_interval_seconds": 30,
+    },
+    "ab_testing": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/ab_tests.json",
+    },
+    "cost_tracking": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/cost_tracking.json",
+        "default_tier": "standard",
+        "pricing_tiers": {
+            "standard": {"cost_per_1k_tokens": 0.001},
+            "premium": {"cost_per_1k_tokens": 0.002},
+        },
+    },
+    "alerting": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/alerts.json",
+        "webhook_url": "",
+        "slack_webhook": "",
+        "pagerduty_key": "",
+        "severity_levels": ["info", "warning", "critical"],
+    },
+    "security_scan": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/security_scan.json",
+        "scan_paths": ["lib/lfm3_npu/", "bin/", "scripts/"],
+        "exclude_paths": [".git/", "__pycache__/", ".pytest_cache/"],
+    },
+    "key_rotation": {
+        "storage_path": "/media/scott/data/lfm3-npu-tool/var/key_rotation.json",
+        "policies": [
+            {"name": "age_based", "max_age_days": 90},
+            {"name": "usage_based", "max_usage_count": 10000},
+            {"name": "cost_based", "max_cost_usd": 100.0},
+        ],
+    },
 }
 
 

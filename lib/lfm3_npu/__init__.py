@@ -31,7 +31,7 @@ from .inference import LFM3NPUInference
 from .server import ServerManager
 from .benchmark import bench_model, bench_concurrency
 from .converter import convert_model
-from .metrics import MetricsCollector
+from .metrics import MetricsCollector, EnterpriseMetricsCollector
 from .compare import compare
 from .watchdog import Watchdog, watchdog_main
 
@@ -54,6 +54,7 @@ from .rbac import RBACAuth
 from .regression_detection import get_regression_detector, RegressionDetector
 from .security_scan import SecurityScanner
 from .slo import get_tracker, SLOTracker
+from .config_schema import validate_config, ConfigSchema
 from .tls import tls_ready, https_url
 from .tracing import get_tracer
 from .validation import validate_prompt
@@ -70,6 +71,7 @@ __all__ = [
     "bench_concurrency",
     "convert_model",
     "MetricsCollector",
+    "EnterpriseMetricsCollector",
     "compare",
     "Watchdog",
     "watchdog_main",
@@ -104,6 +106,8 @@ __all__ = [
     "https_url",
     "get_tracer",
     "validate_prompt",
+    "validate_config",
+    "ConfigSchema",
     "get_ab_test_manager",
     "ABTestManager",
     "ABTest",

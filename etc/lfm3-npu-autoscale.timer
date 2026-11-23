@@ -1,0 +1,10 @@
+[Unit]
+Description=LFM3-1.7B Auto-Scaler Evaluation Timer
+Requires=lfm3-npu-autoscale.service
+
+[Timer]
+OnCalendar=*:*/5
+Persistent=true
+
+[Install]
+WantedBy=timers.target

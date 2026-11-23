@@ -342,3 +342,111 @@ logrotate -f etc/logrotate-lfm3-npu.conf
 ## License
 
 Internal use only.
+
+## Enterprise Modules
+
+The following enterprise-grade modules are available via the `lfm3-npu` CLI:
+
+### Model Promotion Pipeline (CI/CD)
+
+Staging → Canary → Production promotion with automated gates, approval workflow, rollback, and audit trail.
+
+```bash
+# Request a promotion
+lfm3-npu promotion request --model-version 2.0.0 --from-stage staging --to-stage canary --auto-approve
+
+# Approve and deploy
+lfm3-npu promotion approve <request-id> --approved-by admin
+lfm3-npu promotion deploy <request-id>
+
+# Rollback
+lfm3-npu promotion rollback 2.0.0 --reason "regression detected"
+
+# List and view stages
+lfm3-npu promotion list
+lfm3-npu promotion stage
+```
+
+### Disaster Recovery (Multi-Region)
+
+Region management with health checking, automatic failover, manual failback, and replication state tracking.
+
+```bash
+# Add regions
+lfm3-npu dr add-region us-east-1 --status primary --endpoint http://use1:1239
+lfm3-npu dr add-region us-west-2 --status secondary --endpoint http://usw2:1239
+
+# Check health, failover, failback
+lfm3-npu dr check-health
+lfm3-npu dr failover us-west-2 --reason "primary outage"
+lfm3-npu dr failback us-east-1
+
+# Status and history
+lfm3-npu dr status
+lfm3-npu dr history
+```
+
+### Auto-Scaling
+
+Metrics-based auto-scaling (CPU, memory, queue depth, latency, error rate) with configurable cooldowns.
+
+```bash
+# Evaluate scaling decision
+lfm3-npu autoscale evaluate
+
+# View status and policy
+lfm3-npu autoscale status
+lfm3-npu autoscale policy --min-replicas 2 --max-replicas 20
+
+# Manual scaling
+lfm3-npu autoscale scale-up
+lfm3-npu autoscale scale-down
+```
+
+### A/B Testing
+
+Create and manage A/B tests with traffic splitting, consistent user routing, metric recording, statistical analysis, and winner promotion.
+
+```bash
+# Create and start a test
+lfm3-npu abtest create test-001 "v2 vs v1" lfm3-1.7b-v1 lfm3-1.7b-v2 --traffic-split 0.2
+lfm3-npu abtest start test-001
+
+# Route a user to a variant
+lfm3-npu abtest variant test-001 user-123
+
+# Record metrics and analyze
+lfm3-npu abtest record test-001 treatment --requests 100 --conversions 15 --latency 55
+lfm3-npu abtest analyze test-001
+
+# Promote winner
+lfm3-npu abtest promote test-001
+```
+
+### Additional Enterprise CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `cost` | Cost tracking and billing (calculate, record, report, invoice) |
+| `security` | Automated security scanning (SAST, secrets, dependencies) |
+| `regress` | Performance regression detection (baseline, check) |
+| `rotation` | API key rotation management (policy, check, rotate, history) |
+| `keys` | Self-service API key management (create, list, get, update, revoke, rotate) |
+| `tenant` | Multi-tenancy management (quotas, rate limits, usage) |
+| `model` | Model versioning / canary routing (list, get, register, canary, promote, rollback) |
+| `lb` | Load balancer with health-based failover (start, stop, status) |
+| `alert` | Real-time alerting (test, severity, message, webhook) |
+| `backup` | Backup/restore with integrity verification (create, list, delete, restore) |
+| `audit` | SIEM audit logs with risk scoring |
+| `feature-flags` | Feature flags with percentage rollout and kill switches |
+| `config-validate` | Validate configuration against schema |
+| `config-reload` | Hot-reload configuration |
+
+### Client SDKs
+
+- **Go SDK**: `clients/go/lfm3.go` — `NewClient`, `Chat`, `ChatCompletion`, `Health`, `ListModels`
+- **TypeScript SDK**: `clients/typescript/lfm3.ts` — `LFM3Client`, `chat`, `chatCompletion`, `health`, `listModels`, `chatCompletionStream`
+
+### Configuration
+
+All enterprise modules are configurable via `etc/lfm3-npu-config.yaml`. Copy to `~/.config/lfm3-npu/config.yaml` to customize. The config schema is validated by `lfm3-npu config-validate` and supports hot-reload via `lfm3-npu config-reload`.

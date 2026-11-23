@@ -349,6 +349,112 @@ def test_cli_has_abtest_commands():
     print("  ✓ CLI abtest commands present")
 
 
+def test_cli_promotion_stage_end_to_end():
+    """Test CLI promotion stage command actually executes."""
+    import subprocess, os, tempfile
+    env = os.environ.copy()
+    env["LFM3_PROMOTION_STORAGE"] = os.path.join(tempfile.mkdtemp(), "promotion.json")
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "promotion", "stage"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"promotion stage failed: {result.stderr}"
+    print("  ✓ CLI promotion stage end-to-end works")
+
+
+def test_cli_dr_status_end_to_end():
+    """Test CLI dr status command actually executes."""
+    import subprocess, os, tempfile
+    env = os.environ.copy()
+    env["LFM3_DR_STORAGE"] = os.path.join(tempfile.mkdtemp(), "dr.json")
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "dr", "status"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"dr status failed: {result.stderr}"
+    assert "DR Status" in result.stdout
+    print("  ✓ CLI dr status end-to-end works")
+
+
+def test_cli_autoscale_status_end_to_end():
+    """Test CLI autoscale status command actually executes."""
+    import subprocess, os, tempfile
+    env = os.environ.copy()
+    env["LFM3_AUTOSCALER_STORAGE"] = os.path.join(tempfile.mkdtemp(), "autoscaler.json")
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "autoscale", "status"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"autoscale status failed: {result.stderr}"
+    assert "Auto-Scaler Status" in result.stdout
+    print("  ✓ CLI autoscale status end-to-end works")
+
+
+def test_cli_abtest_list_end_to_end():
+    """Test CLI abtest list command actually executes."""
+    import subprocess, os, tempfile
+    env = os.environ.copy()
+    env["LFM3_ABTEST_STORAGE"] = os.path.join(tempfile.mkdtemp(), "ab_tests.json")
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "abtest", "list"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"abtest list failed: {result.stderr}"
+    assert "A/B tests" in result.stdout
+    print("  ✓ CLI abtest list end-to-end works")
+
+
+def test_config_validate_new_sections():
+    """Test that config-validate CLI accepts new module sections."""
+    import subprocess, os, tempfile
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    # Write a temp config with new sections
+    config_dir = tempfile.mkdtemp()
+    config_path = os.path.join(config_dir, "config.yaml")
+    with open(config_path, "w") as f:
+        f.write("""
+model_promotion:
+  auto_approve: false
+  stages: [staging, canary, production]
+disaster_recovery:
+  regions:
+    - name: primary
+      status: primary
+      endpoint: http://localhost:1239
+auto_scaling:
+  min_replicas: 1
+  max_replicas: 10
+ab_testing: {}
+cost_tracking: {}
+alerting: {}
+security_scan: {}
+key_rotation: {}
+""")
+    env["LFM3_NPU_CONFIG"] = config_path
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "config-validate"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"config-validate failed: {result.stderr}"
+    print("  ✓ CLI config-validate with new sections works")
+
+
 def main():
     """Run all new module tests."""
     print("Running new enterprise module tests...\n")
@@ -367,6 +473,11 @@ def main():
         test_cli_has_dr_commands,
         test_cli_has_autoscale_commands,
         test_cli_has_abtest_commands,
+        test_cli_promotion_stage_end_to_end,
+        test_cli_dr_status_end_to_end,
+        test_cli_autoscale_status_end_to_end,
+        test_cli_abtest_list_end_to_end,
+        test_config_validate_new_sections,
     ]
 
     passed = 0
