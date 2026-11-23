@@ -30,7 +30,7 @@ from tokenizers import Tokenizer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfm3_npu.config import load_config
-from lfm3_npu.metrics import MetricsCollector
+from lfm3_npu.metrics import MetricsCollector, EnterpriseMetricsCollector
 from lfm3_npu.tracing import init_tracer, trace_prefill, trace_decode, trace_request, get_tracer
 from lfm3_npu.batch_inference import (
     ContinuousBatcher,
@@ -56,6 +56,9 @@ from lfm3_npu.model_registry import ModelRegistry, get_model_registry, MODEL_STA
 from lfm3_npu.api_key_management import KeyManager, generate_api_key, hash_key, get_key_manager, KEY_PREFIX
 from lfm3_npu.alerting import get_alert_manager, ALERT_CRITICAL, ALERT_WARNING
 from lfm3_npu.cost_tracking import get_cost_tracker
+from lfm3_npu.auto_scaler import get_auto_scaler
+from lfm3_npu.ab_testing import get_ab_test_manager
+from lfm3_npu.disaster_recovery import get_dr_manager
 
 
 # ====================================================================== #
@@ -150,6 +153,18 @@ _alert_manager.send_info(
 _cost_tracker = get_cost_tracker()
 print(f"{SERVER_NAME}: Cost tracking enabled (currency: {_cost_tracker.currency})", flush=True)
 
+# Enterprise: auto-scaler
+_auto_scaler = get_auto_scaler()
+print(f"{SERVER_NAME}: Auto-scaler enabled (min={_auto_scaler.policy.min_replicas}, max={_auto_scaler.policy.max_replicas})", flush=True)
+
+# Enterprise: A/B testing
+_ab_test_manager = get_ab_test_manager()
+print(f"{SERVER_NAME}: A/B testing enabled ({len(_ab_test_manager._tests)} test(s))", flush=True)
+
+# Enterprise: disaster recovery
+_dr_manager = get_dr_manager()
+print(f"{SERVER_NAME}: Disaster recovery enabled ({len(_dr_manager._regions)} region(s))", flush=True)
+
 # Enterprise: SLO tracker
 _slo_target_availability = float(os.environ.get("LFM3_SLO_AVAILABILITY", "99.9"))
 _slo_target_latency_ms = float(os.environ.get("LFM3_SLO_LATENCY_P95_MS", "5000"))
@@ -198,6 +213,7 @@ def _log(level: str, message: str, **kwargs) -> None:
 tokenizer: Optional[Tokenizer] = None
 batcher: Optional[ContinuousBatcher] = None
 metrics: Optional[MetricsCollector] = None
+_enterprise_metrics: Optional[EnterpriseMetricsCollector] = None
 
 # Layer types (loaded at startup)
 CONV_LAYERS: List[int] = []
@@ -443,7 +459,7 @@ class UsageResponse(BaseModel):
 
 def load_model():
     """Load tokenizer and ONNX model, initialize continuous batcher."""
-    global tokenizer, batcher, metrics, CONV_LAYERS, ATTN_LAYERS, HIDDEN, CONV_L_CACHE
+    global tokenizer, batcher, metrics, _enterprise_metrics, CONV_LAYERS, ATTN_LAYERS, HIDDEN, CONV_L_CACHE
     global _request_queue, _shutdown_event, _pending, _active, START_TIME
 
     _pending = []
@@ -489,6 +505,7 @@ def load_model():
         print(f"{SERVER_NAME}: Warmup complete in {(t1-t0)*1000:.0f}ms", flush=True)
 
     metrics = MetricsCollector(provider=PROVIDER, model=f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}")
+    _enterprise_metrics = EnterpriseMetricsCollector()
     _request_queue = asyncio.Queue()
     _shutdown_event = asyncio.Event()
 
@@ -848,6 +865,17 @@ async def health():
     if START_TIME is not None:
         uptime = time.time() - START_TIME
     batcher_metrics = batcher.get_metrics() if batcher else {}
+
+    # Enterprise: auto-scaler status
+    scaler_status = _auto_scaler.get_status()
+
+    # Enterprise: disaster recovery status
+    dr_status = _dr_manager.get_status()
+
+    # Enterprise: A/B testing active tests
+    active_tests = [t for t in _ab_test_manager.list_tests()
+                    if t.status.value == "running"]
+
     return {
         "status": "healthy",
         "provider": PROVIDER,
@@ -858,6 +886,20 @@ async def health():
         "avg_decode_ms": batcher_metrics.get("avg_decode_ms", 0),
         "port": SERVER_PORT,
         "tls": tls_status(),
+        "autoscaler": {
+            "current_replicas": scaler_status["current_replicas"],
+            "min_replicas": scaler_status["min_replicas"],
+            "max_replicas": scaler_status["max_replicas"],
+        },
+        "disaster_recovery": {
+            "primary": dr_status["primary"],
+            "primary_healthy": dr_status["primary_healthy"],
+            "ready_secondaries": dr_status["ready_secondaries"],
+        },
+        "ab_testing": {
+            "active_tests": len(active_tests),
+            "test_ids": [t.test_id for t in active_tests],
+        },
     }
 
 
@@ -969,6 +1011,11 @@ async def metrics_endpoint(request: Request, _=Depends(verify_api_key)):
     text += prometheus_metrics_all()
     text += "\n# Circuit breaker metrics\n"
     text += circuit_breaker_prometheus_metrics()
+    text += "\n# Enterprise metrics\n"
+    ent_metrics_text = _enterprise_metrics.get_metrics()
+    if isinstance(ent_metrics_text, bytes):
+        ent_metrics_text = ent_metrics_text.decode("utf-8")
+    text += ent_metrics_text
     return PlainTextResponse(content=text, media_type=metrics.get_content_type())
 
 
@@ -1309,6 +1356,22 @@ async def _chat_completions_impl(
     if selected_model is None:
         raise HTTPException(status_code=503, detail="No model version available")
     model_version = selected_model.version
+
+    # Enterprise: A/B testing - route request to variant if active test exists
+    _ab_test_variant = None
+    for test in _ab_test_manager.list_tests():
+        if test.status.value == "running":
+            variant = _ab_test_manager.get_variant_for_user(
+                test.test_id, api_key_hash or client_ip or request_id
+            )
+            if variant:
+                _ab_test_variant = variant
+                model_version = variant.model_version
+                _ab_test_manager.record_variant_metric(
+                    test.test_id, variant.variant_id, request_count=1
+                )
+                break
+
     model_start = time.perf_counter()
 
     with trace_request(
@@ -1433,6 +1496,16 @@ async def _chat_completions_impl(
         # Enterprise: SLO tracking - record successful request
         record_request(PROVIDER, f"{SERVER_NAME}-{PROVIDER_LABEL.lower()}",
                        True, duration_ms, "chat/completions")
+
+        # Enterprise: auto-scaler - record replica count for Prometheus
+        _auto_scaler_record = _auto_scaler.get_status()
+        if _enterprise_metrics:
+            _enterprise_metrics.record_autoscaler_replicas(_auto_scaler_record["current_replicas"])
+
+        # Enterprise: A/B testing - add variant header to response
+        if _ab_test_variant:
+            request_span.set_attribute("ab_test.variant", _ab_test_variant.variant_id)
+            request_span.set_attribute("ab_test.model", _ab_test_variant.model_version)
 
         # Enterprise: token usage tracking per API key
         completion_toks = len(tokenizer.encode(generated_text).ids)

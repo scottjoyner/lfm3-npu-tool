@@ -206,6 +206,275 @@ Logs:
 - `/media/scott/data/lfm3-npu-tool/var/log/doctor-cron.log`
 - `/media/scott/data/lfm3-npu-tool/var/log/boot-start.log`
 
+## Enterprise Modules Operations
+
+### Model Promotion Pipeline (CI/CD)
+
+Staging → Canary → Production promotion with automated gates:
+
+```bash
+# Request a promotion
+lfm3-npu promotion request --model-version 2.0.0 --from-stage staging --to-stage canary --auto-approve
+
+# Approve and deploy
+lfm3-npu promotion approve <request-id> --approved-by admin
+lfm3-npu promotion deploy <request-id>
+
+# Rollback a production model
+lfm3-npu promotion rollback 2.0.0 --reason "regression detected"
+
+# View current stages
+lfm3-npu promotion stage
+lfm3-npu promotion stage 2.0.0
+
+# List all requests
+lfm3-npu promotion list
+```
+
+Storage: `var/promotion.json`
+
+### Disaster Recovery (Multi-Region)
+
+Region management with health checking, failover, and failback:
+
+```bash
+# Add regions
+lfm3-npu dr add-region us-east-1 --status primary --endpoint http://use1:1239
+lfm3-npu dr add-region us-west-2 --status secondary --endpoint http://usw2:1239
+
+# Check health
+lfm3-npu dr check-health
+lfm3-npu dr check-health us-east-1
+
+# Set replication state
+lfm3-npu dr replication us-west-2 --models --config --keys
+
+# Failover to secondary
+lfm3-npu dr failover us-west-2 --reason "primary outage"
+
+# Failback to primary
+lfm3-npu dr failback us-east-1
+
+# Status and history
+lfm3-npu dr status
+lfm3-npu dr history
+```
+
+Storage: `var/dr.json`
+Service: `lfm3-npu-dr-health.service` / `lfm3-npu-dr-health.timer` (every 1 min)
+
+### Auto-Scaling
+
+Metrics-based scaling with configurable cooldowns:
+
+```bash
+# Evaluate scaling decision
+lfm3-npu autoscale evaluate
+
+# View status and current policy
+lfm3-npu autoscale status
+
+# Update policy
+lfm3-npu autoscale policy --min-replicas 2 --max-replicas 20 --target-cpu 70
+
+# Manual scaling
+lfm3-npu autoscale scale-up
+lfm3-npu autoscale scale-down
+
+# View history
+lfm3-npu autoscale history --limit 20
+```
+
+Storage: `var/autoscaler.json`
+Service: `lfm3-npu-autoscale.service` / `lfm3-npu-autoscale.timer` (every 5 min)
+
+### A/B Testing
+
+Create and manage A/B tests with traffic splitting:
+
+```bash
+# Create a test
+lfm3-npu abtest create test-001 "v2 vs v1" lfm3-1.7b-v1 lfm3-1.7b-v2 --traffic-split 0.2
+
+# Start the test
+lfm3-npu abtest start test-001
+
+# Route a user to a variant (consistent hash-based)
+lfm3-npu abtest variant test-001 user-123
+
+# Record metrics
+lfm3-npu abtest record test-001 treatment --requests 100 --conversions 15 --latency 55
+
+# Get results
+lfm3-npu abtest results test-001
+
+# Analyze and get recommendation
+lfm3-npu abtest analyze test-001
+
+# Complete and promote winner
+lfm3-npu abtest complete test-001 --winner treatment
+lfm3-npu abtest promote test-001
+```
+
+Storage: `var/ab_tests.json`
+
+### Cost Tracking & Billing
+
+```bash
+# Calculate cost for a tenant
+lfm3-npu cost calculate --tenant tenant-1 --input-tokens 1000 --output-tokens 500
+
+# Record cost
+lfm3-npu cost record --tenant tenant-1 --tokens 1500 --usd 0.03
+
+# Generate report
+lfm3-npu cost report --tenant tenant-1
+
+# Generate invoice
+lfm3-npu cost invoice --tenant tenant-1 --month 2026-11
+```
+
+Storage: `var/cost_tracking.json`
+
+### API Key Rotation
+
+Configurable rotation policies (age, usage, cost):
+
+```bash
+# View rotation policy
+lfm3-npu rotation policy
+
+# Check if rotation is needed
+lfm3-npu rotation check
+
+# Force rotate a key
+lfm3-npu rotation rotate <key_id>
+
+# View rotation history
+lfm3-npu rotation history
+```
+
+Storage: `var/key_rotation.json`
+
+### Security Scanning
+
+SAST, secrets detection, and dependency vulnerability scanning:
+
+```bash
+# Run security scan
+lfm3-npu security scan --report-format json
+
+# View results
+lfm3-npu security report
+```
+
+Storage: `var/security_scan.json`
+Service: `lfm3-npu-security-scan.service` / `lfm3-npu-security-scan.timer` (daily at 02:00)
+
+### Self-Service API Key Management
+
+```bash
+# Create a key
+lfm3-npu keys create --role operator --label "team-a"
+
+# List keys
+lfm3-npu keys list
+
+# Get key info
+lfm3-npu keys get <key_id>
+
+# Update a key
+lfm3-npu keys update <key_id> --role viewer
+
+# Revoke a key
+lfm3-npu keys revoke <key_id>
+
+# Rotate a key
+lfm3-npu keys rotate <key_id>
+
+# View key usage
+lfm3-npu keys usage <key_id>
+```
+
+### Multi-Tenancy
+
+Per-tenant quotas, rate limits, and usage tracking:
+
+```bash
+# List tenants
+lfm3-npu tenant list
+
+# Get tenant details
+lfm3-npu tenant get <tenant_id>
+
+# Set tenant quota
+lfm3-npu tenant quota <tenant_id> --max-tokens 1000000
+
+# View tenant usage
+lfm3-npu tenant usage <tenant_id>
+```
+
+### Load Balancer (port 1240)
+
+Health-based failover between CPU and NPU backends:
+
+```bash
+# Start load balancer
+lfm3-npu lb start --port 1240 --primary npu --secondary cpu
+
+# Check status
+lfm3-npu lb status
+
+# Stop load balancer
+lfm3-npu lb stop
+```
+
+### Configuration Validation & Hot-Reload
+
+```bash
+# Validate configuration against schema
+lfm3-npu config-validate
+
+# Hot-reload configuration
+lfm3-npu config-reload
+
+# Feature flags
+lfm3-npu feature-flags list
+lfm3-npu feature-flags enable <flag>
+lfm3-npu feature-flags disable <flag>
+```
+
+### Audit Logs
+
+SIEM-ready audit logs with risk scoring:
+
+```bash
+# View audit logs
+lfm3-npu audit list
+
+# Export audit log
+lfm3-npu audit export --format json
+```
+
+### Backup & Restore
+
+```bash
+# Create backup
+lfm3-npu backup create --name weekly-2026-11-23
+
+# List backups
+lfm3-npu backup list
+
+# Restore from backup
+lfm3-npu backup restore weekly-2026-11-23
+
+# Delete backup
+lfm3-npu backup delete weekly-2026-11-23
+```
+
+All backups include SHA-256 integrity verification and automatic pruning.
+
+
 ## Log Rotation
 
 Logrotate config: `etc/logrotate-lfm3-npu.conf`

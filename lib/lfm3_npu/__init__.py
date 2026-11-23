@@ -39,7 +39,7 @@ from .watchdog import Watchdog, watchdog_main
 from .alerting import get_alert_manager
 from .api_key_management import get_key_manager
 from .audit import get_audit
-from .auto_scaler import get_auto_scaler, AutoScaler, ScalingPolicy, ScalingDecision
+from .auto_scaler import get_auto_scaler, AutoScaler, ScalingPolicy, ScalingDecision, ScalingAction
 from .backup_restore import get_backup_manager
 from .cost_tracking import get_cost_tracker
 from .disaster_recovery import get_dr_manager, DisasterRecoveryManager
@@ -47,7 +47,7 @@ from .enterprise import EnterpriseMiddleware
 from .feature_flags import get_flags
 from .key_rotation import get_rotation_manager
 from .load_balancer import LoadBalancer
-from .model_promotion import get_promotion_pipeline, PromotionPipeline, PromotionStage
+from .model_promotion import get_promotion_pipeline, PromotionPipeline, PromotionStage, PromotionStatus
 from .model_registry import get_model_registry
 from .multi_tenancy import get_tenant_manager
 from .rbac import RBACAuth
@@ -83,6 +83,7 @@ __all__ = [
     "AutoScaler",
     "ScalingPolicy",
     "ScalingDecision",
+    "ScalingAction",
     "get_backup_manager",
     "get_cost_tracker",
     "get_dr_manager",
@@ -94,6 +95,7 @@ __all__ = [
     "get_promotion_pipeline",
     "PromotionPipeline",
     "PromotionStage",
+    "PromotionStatus",
     "get_model_registry",
     "get_tenant_manager",
     "RBACAuth",
