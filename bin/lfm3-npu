@@ -38,6 +38,8 @@ Commands:
     dr              Disaster recovery (add-region/list-regions/check-health/set-primary/replication/failover/failback/status/history)
     autoscale       Auto-scaling (evaluate/status/policy/scale-up/scale-down/history)
     abtest          A/B testing (create/start/complete/list/get/variant/results/analyze/record/promote)
+    slo             SLO tracking (snapshot/status)
+    tracing         OpenTelemetry tracing (status/init)
 
 Examples:
     lfm3-npu generate "The quick brown fox" --server npu --max-tokens 50
@@ -278,6 +280,62 @@ def cmd_security(args) -> int:
         print(result.stderr, end="", file=sys.stderr)
 
     return result.returncode
+
+
+# SLO tracking functions
+def cmd_slo(args) -> int:
+    """Show SLO snapshot and error budget status."""
+    from lfm3_npu.slo import SLOTracker, get_tracker
+
+    tracker = get_tracker(args.provider, args.model)
+    snap = tracker.snapshot()
+
+    print(f"SLO Snapshot ({args.provider}/{args.model}):")
+    print(f"  Window: {snap['window_seconds']}s")
+    print(f"  Total requests: {snap['total_requests']}")
+    print(f"  Success: {snap['total_success']}  Errors: {snap['total_errors']}")
+    print(f"  Availability: {snap['availability_percent']}% (target: {snap['availability_target_percent']}%)")
+    print(f"  Availability SLO met: {snap['availability_slo_met']}")
+    print(f"  P95 latency: {snap['p95_latency_ms']}ms (target: {snap['latency_p95_target_ms']}ms)")
+    print(f"  Latency SLO met: {snap['latency_slo_met']}")
+    print(f"  Error budget used: {snap['error_budget_used_percent']}%")
+    print(f"  Error budget remaining: {snap['error_budget_remaining_percent']}%")
+    print(f"  Error budget exhausted: {snap['error_budget_exhausted']}")
+    print(f"  Overall SLO met: {snap['slo_met']}")
+    return 0
+
+
+# Tracing functions
+def cmd_tracing(args) -> int:
+    """Show or initialize OpenTelemetry tracing."""
+    from lfm3_npu.tracing import init_tracer, get_tracer, _initialized, _tracer
+
+    if args.action == "status":
+        if _initialized:
+            print(f"Tracing: initialized (service={args.service_name})")
+            print(f"  Tracer: {_tracer}")
+            if args.otlp_endpoint:
+                print(f"  OTLP endpoint: {args.otlp_endpoint}")
+            else:
+                print(f"  OTLP endpoint: not configured (no-op tracer)")
+        else:
+            print("Tracing: not initialized")
+        return 0
+
+    elif args.action == "init":
+        tracer = init_tracer(
+            service_name=args.service_name,
+            otlp_endpoint=args.otlp_endpoint,
+            enabled=True,
+        )
+        print(f"Tracing initialized: service={args.service_name}")
+        if args.otlp_endpoint:
+            print(f"  OTLP endpoint: {args.otlp_endpoint}")
+        else:
+            print(f"  OTLP endpoint: not configured (using no-op tracer)")
+        return 0
+
+    return 1
 
 
 # API key management CLI functions
@@ -3189,6 +3247,42 @@ def main() -> int:
     )
     audit_parser.add_argument("--limit", type=int, default=50, help="Max entries to show")
     audit_parser.set_defaults(func=cmd_audit)
+
+    # ------------------------------------------------------------------
+    # SLO subcommand
+    # ------------------------------------------------------------------
+    slo_parser = subparsers.add_parser(
+        "slo", help="Service-Level Objective tracking"
+    )
+    slo_parser.add_argument(
+        "action", choices=["snapshot", "status"],
+        help="SLO action (snapshot or status)"
+    )
+    slo_parser.add_argument(
+        "--provider", default="cpu", help="Provider name for metrics labels"
+    )
+    slo_parser.add_argument(
+        "--model", default="lfm3-1.7b", help="Model name for metrics labels"
+    )
+    slo_parser.set_defaults(func=cmd_slo)
+
+    # ------------------------------------------------------------------
+    # Tracing subcommand
+    # ------------------------------------------------------------------
+    tracing_parser = subparsers.add_parser(
+        "tracing", help="OpenTelemetry tracing management"
+    )
+    tracing_parser.add_argument(
+        "action", choices=["status", "init"],
+        help="Tracing action (status or init)"
+    )
+    tracing_parser.add_argument(
+        "--service-name", default="lfm3-inference", help="Service name for tracing"
+    )
+    tracing_parser.add_argument(
+        "--otlp-endpoint", default=None, help="OTLP collector endpoint URL"
+    )
+    tracing_parser.set_defaults(func=cmd_tracing)
 
     # ------------------------------------------------------------------
     # Load balancer subcommand

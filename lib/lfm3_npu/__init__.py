@@ -53,10 +53,10 @@ from .multi_tenancy import get_tenant_manager
 from .rbac import RBACAuth
 from .regression_detection import get_regression_detector, RegressionDetector
 from .security_scan import SecurityScanner
-from .slo import get_tracker, SLOTracker
+from .slo import get_tracker, SLOTracker, SLOTarget
 from .config_schema import validate_config, ConfigSchema
 from .tls import tls_ready, https_url
-from .tracing import get_tracer
+from .tracing import init_tracer, get_tracer, trace_prefill, trace_decode, trace_request
 from .validation import validate_prompt
 from .ab_testing import get_ab_test_manager, ABTestManager, ABTest
 
@@ -104,9 +104,14 @@ __all__ = [
     "SecurityScanner",
     "get_tracker",
     "SLOTracker",
+    "SLOTarget",
     "tls_ready",
     "https_url",
     "get_tracer",
+    "init_tracer",
+    "trace_prefill",
+    "trace_decode",
+    "trace_request",
     "validate_prompt",
     "validate_config",
     "ConfigSchema",

@@ -455,6 +455,89 @@ key_rotation: {}
     print("  ✓ CLI config-validate with new sections works")
 
 
+def test_load_balancer_module():
+    """Test load_balancer module imports and key classes."""
+    from lfm3_npu.load_balancer import LoadBalancer, Backend
+    lb = LoadBalancer()
+    assert lb.primary_name == "npu"
+    assert lb.secondary_name == "cpu"
+    assert "cpu" in lb.backends
+    assert "npu" in lb.backends
+    print("  ✓ load_balancer module works")
+
+
+def test_multi_tenancy_module():
+    """Test multi_tenancy module imports and key classes."""
+    from lfm3_npu.multi_tenancy import TenantManager, get_tenant_manager, extract_tenant_id, DEFAULT_TENANT_ID
+    tm = TenantManager()
+    assert DEFAULT_TENANT_ID == "default"
+    headers = {"X-Tenant-ID": "tenant-1"}
+    tid = extract_tenant_id(headers)
+    assert tid == "tenant-1"
+    print("  ✓ multi_tenancy module works")
+
+
+def test_regression_detection_module():
+    """Test regression_detection module imports and key classes."""
+    from lfm3_npu.regression_detection import RegressionDetector, RegressionResult, get_regression_detector
+    rd = RegressionDetector()
+    assert rd is not None
+    print("  ✓ regression_detection module works")
+
+
+def test_tracing_module():
+    """Test tracing module imports and key functions."""
+    from lfm3_npu.tracing import init_tracer, get_tracer
+    tracer = init_tracer(service_name="test-service", enabled=False)
+    assert tracer is not None
+    t2 = get_tracer()
+    assert t2 is not None
+    print("  ✓ tracing module works")
+
+
+def test_api_key_management_module():
+    """Test api_key_management module imports and key classes."""
+    from lfm3_npu.api_key_management import KeyManager, ApiKey, get_key_manager
+    km = KeyManager()
+    assert km is not None
+    keys = km.list_keys()
+    assert isinstance(keys, list)
+    print("  ✓ api_key_management module works")
+
+
+def test_cli_slo_snapshot_end_to_end():
+    """Test CLI slo snapshot command actually executes."""
+    import subprocess, os, tempfile
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "slo", "snapshot"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"slo snapshot failed: {result.stderr}"
+    assert "SLO Snapshot" in result.stdout
+    assert "Availability" in result.stdout
+    print("  ✓ CLI slo snapshot end-to-end works")
+
+
+def test_cli_tracing_status_end_to_end():
+    """Test CLI tracing status command actually executes."""
+    import subprocess, os
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.join(SERVER_DIR, "lib")
+
+    result = subprocess.run(
+        ["python3", os.path.join(SERVER_DIR, "bin", "lfm3-npu"),
+         "tracing", "status"],
+        capture_output=True, text=True, timeout=10, env=env
+    )
+    assert result.returncode == 0, f"tracing status failed: {result.stderr}"
+    assert "Tracing" in result.stdout
+    print("  ✓ CLI tracing status end-to-end works")
+
+
 def main():
     """Run all new module tests."""
     print("Running new enterprise module tests...\n")
@@ -478,6 +561,13 @@ def main():
         test_cli_autoscale_status_end_to_end,
         test_cli_abtest_list_end_to_end,
         test_config_validate_new_sections,
+        test_load_balancer_module,
+        test_multi_tenancy_module,
+        test_regression_detection_module,
+        test_tracing_module,
+        test_api_key_management_module,
+        test_cli_slo_snapshot_end_to_end,
+        test_cli_tracing_status_end_to_end,
     ]
 
     passed = 0

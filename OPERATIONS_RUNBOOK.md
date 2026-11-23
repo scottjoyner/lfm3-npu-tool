@@ -474,6 +474,47 @@ lfm3-npu backup delete weekly-2026-11-23
 
 All backups include SHA-256 integrity verification and automatic pruning.
 
+### SLO (Service-Level Objective) Tracking
+
+Monitor availability and latency SLOs with error budget tracking:
+
+```bash
+# Take an SLO snapshot
+lfm3-npu slo snapshot
+
+# SLO snapshot with custom provider/model labels
+lfm3-npu slo snapshot --provider npu --model lfm3-1.7b-npu
+```
+
+The SLO tracker records:
+- Availability percentage vs. target (default 99.9%)
+- P95 latency vs. target (default 5000ms)
+- Error budget consumed and remaining
+- Whether the overall SLO is met
+
+Metrics are exposed via Prometheus at the `/metrics` endpoint.
+
+### OpenTelemetry Tracing
+
+Distributed tracing for prefill/decode phases:
+
+```bash
+# Check tracing status
+lfm3-npu tracing status
+
+# Initialize tracing with OTLP endpoint (e.g., Jaeger)
+lfm3-npu tracing init --service-name lfm3-inference --otlp-endpoint http://localhost:4318
+
+# Initialize without OTLP (no-op mode for local testing)
+lfm3-npu tracing init
+```
+
+Traces are exported via OTLP to compatible collectors (Jaeger, Tempo,
+OpenTelemetry Collector). Spans are created for:
+- Full inference requests (`trace_request`)
+- Prefill phase (`trace_prefill`)
+- Decode phase (`trace_decode`)
+
 
 ## Log Rotation
 
