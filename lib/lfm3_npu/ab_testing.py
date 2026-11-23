@@ -25,6 +25,7 @@ import enum
 import hashlib
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -146,6 +147,7 @@ class ABTestManager:
         self._tests: Dict[str, ABTest] = {}
         self._results: Dict[str, Dict[str, ABTestResult]] = {}  # test_id -> variant_id -> result
         self._assignments: Dict[str, str] = {}  # user_id -> variant_id (for consistent routing)
+        self._lock = threading.RLock()
         self._load()
 
     # ------------------------------------------------------------------ #
@@ -160,36 +162,38 @@ class ABTestManager:
 
             with open(self.storage_path, "r") as f:
                 data = _json.load(f)
-            for tid, tdata in data.get("tests", {}).items():
-                variants = [ABVariant(**v) for v in tdata.get("variants", [])]
-                self._tests[tid] = ABTest(
-                    test_id=tdata["test_id"],
-                    name=tdata["name"],
-                    description=tdata.get("description"),
-                    status=TestStatus(tdata.get("status", "draft")),
-                    variants=variants,
-                    created_at=tdata.get("created_at", time.time()),
-                    started_at=tdata.get("started_at"),
-                    completed_at=tdata.get("completed_at"),
-                    winner_variant_id=tdata.get("winner_variant_id"),
-                    metrics=tdata.get("metrics", {}),
-                )
+            with self._lock:
+                for tid, tdata in data.get("tests", {}).items():
+                    variants = [ABVariant(**v) for v in tdata.get("variants", [])]
+                    self._tests[tid] = ABTest(
+                        test_id=tdata["test_id"],
+                        name=tdata["name"],
+                        description=tdata.get("description"),
+                        status=TestStatus(tdata.get("status", "draft")),
+                        variants=variants,
+                        created_at=tdata.get("created_at", time.time()),
+                        started_at=tdata.get("started_at"),
+                        completed_at=tdata.get("completed_at"),
+                        winner_variant_id=tdata.get("winner_variant_id"),
+                        metrics=tdata.get("metrics", {}),
+                    )
         except (_json.JSONDecodeError, OSError):
             pass
 
     def _save(self) -> None:
         import json as _json
 
-        tmp = self.storage_path.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(
-                {
-                    "tests": {tid: t.to_dict() for tid, t in self._tests.items()},
-                },
-                f,
-                indent=2,
-            )
-        tmp.replace(self.storage_path)
+        with self._lock:
+            tmp = self.storage_path.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(
+                    {
+                        "tests": {tid: t.to_dict() for tid, t in self._tests.items()},
+                    },
+                    f,
+                    indent=2,
+                )
+            tmp.replace(self.storage_path)
 
     # ------------------------------------------------------------------ #
     # Test management                                                    #
@@ -205,49 +209,51 @@ class ABTestManager:
         description: Optional[str] = None,
     ) -> ABTest:
         """Create a new A/B test with control and treatment variants."""
-        if test_id in self._tests:
-            raise ValueError(f"Test {test_id} already exists")
+        with self._lock:
+            if test_id in self._tests:
+                raise ValueError(f"Test {test_id} already exists")
 
-        variants = [
-            ABVariant(
-                variant_id="control",
-                name="Control",
-                model_version=control_model,
-                traffic_weight=1.0 - traffic_split,
-                description="Baseline model",
-            ),
-            ABVariant(
-                variant_id="treatment",
-                name="Treatment",
-                model_version=treatment_model,
-                traffic_weight=traffic_split,
-                description="New model under test",
-            ),
-        ]
+            variants = [
+                ABVariant(
+                    variant_id="control",
+                    name="Control",
+                    model_version=control_model,
+                    traffic_weight=1.0 - traffic_split,
+                    description="Baseline model",
+                ),
+                ABVariant(
+                    variant_id="treatment",
+                    name="Treatment",
+                    model_version=treatment_model,
+                    traffic_weight=traffic_split,
+                    description="New model under test",
+                ),
+            ]
 
-        test = ABTest(
-            test_id=test_id,
-            name=name,
-            description=description,
-            status=TestStatus.DRAFT,
-            variants=variants,
-        )
-        self._tests[test_id] = test
-        self._save()
-        return test
+            test = ABTest(
+                test_id=test_id,
+                name=name,
+                description=description,
+                status=TestStatus.DRAFT,
+                variants=variants,
+            )
+            self._tests[test_id] = test
+            self._save()
+            return test
 
     def start_test(self, test_id: str) -> Optional[ABTest]:
         """Start an A/B test."""
-        test = self._tests.get(test_id)
-        if test is None:
-            return None
-        if test.status != TestStatus.DRAFT:
-            return None
+        with self._lock:
+            test = self._tests.get(test_id)
+            if test is None:
+                return None
+            if test.status != TestStatus.DRAFT:
+                return None
 
-        test.status = TestStatus.RUNNING
-        test.started_at = time.time()
-        self._save()
-        return test
+            test.status = TestStatus.RUNNING
+            test.started_at = time.time()
+            self._save()
+            return test
 
     def complete_test(
         self,
@@ -255,30 +261,34 @@ class ABTestManager:
         winner_variant_id: Optional[str] = None,
     ) -> Optional[ABTest]:
         """Complete an A/B test and optionally declare a winner."""
-        test = self._tests.get(test_id)
-        if test is None:
-            return None
+        with self._lock:
+            test = self._tests.get(test_id)
+            if test is None:
+                return None
 
-        test.status = TestStatus.COMPLETED
-        test.completed_at = time.time()
-        test.winner_variant_id = winner_variant_id
-        self._save()
-        return test
+            test.status = TestStatus.COMPLETED
+            test.completed_at = time.time()
+            test.winner_variant_id = winner_variant_id
+            self._save()
+            return test
 
     def get_test(self, test_id: str) -> Optional[ABTest]:
-        return self._tests.get(test_id)
+        with self._lock:
+            return self._tests.get(test_id)
 
     def list_tests(self) -> List[ABTest]:
-        return sorted(self._tests.values(), key=lambda t: t.created_at, reverse=True)
+        with self._lock:
+            return sorted(self._tests.values(), key=lambda t: t.created_at, reverse=True)
 
     def delete_test(self, test_id: str) -> bool:
-        if test_id in self._tests:
-            del self._tests[test_id]
-            if test_id in self._results:
-                del self._results[test_id]
-            self._save()
-            return True
-        return False
+        with self._lock:
+            if test_id in self._tests:
+                del self._tests[test_id]
+                if test_id in self._results:
+                    del self._results[test_id]
+                self._save()
+                return True
+            return False
 
     # ------------------------------------------------------------------ #
     # Variant routing                                                    #
@@ -288,24 +298,25 @@ class ABTestManager:
         self, test_id: str, user_id: str
     ) -> Optional[ABVariant]:
         """Get the variant for a user (consistent routing via hash)."""
-        test = self._tests.get(test_id)
-        if test is None or test.status != TestStatus.RUNNING:
-            return None
+        with self._lock:
+            test = self._tests.get(test_id)
+            if test is None or test.status != TestStatus.RUNNING:
+                return None
 
-        # Consistent hash-based routing
-        hash_input = f"{test_id}:{user_id}"
-        hash_value = int(hashlib.sha256(hash_input.encode()).hexdigest(), 16)
-        normalized = (hash_value % 10000) / 10000.0  # 0.0 to 1.0
+            # Consistent hash-based routing
+            hash_input = f"{test_id}:{user_id}"
+            hash_value = int(hashlib.sha256(hash_input.encode()).hexdigest(), 16)
+            normalized = (hash_value % 10000) / 10000.0  # 0.0 to 1.0
 
-        weights = test.get_variant_weights()
-        cumulative = 0.0
-        for variant, weight in zip(test.variants, weights):
-            cumulative += weight
-            if normalized < cumulative:
-                return variant
+            weights = test.get_variant_weights()
+            cumulative = 0.0
+            for variant, weight in zip(test.variants, weights):
+                cumulative += weight
+                if normalized < cumulative:
+                    return variant
 
-        # Fallback to last variant
-        return test.variants[-1] if test.variants else None
+            # Fallback to last variant
+            return test.variants[-1] if test.variants else None
 
     def get_variant_for_request(
         self, test_id: str, request_id: Optional[str] = None
@@ -330,50 +341,51 @@ class ABTestManager:
         cost: float = 0.0,
     ) -> None:
         """Record metrics for a variant in a test."""
-        if test_id not in self._results:
-            self._results[test_id] = {}
+        with self._lock:
+            if test_id not in self._results:
+                self._results[test_id] = {}
 
-        if variant_id not in self._results[test_id]:
-            self._results[test_id][variant_id] = ABTestResult(
-                test_id=test_id,
-                variant_id=variant_id,
-                variant_name="",
-                request_count=0,
-                conversion_count=0,
-                conversion_rate=0.0,
-                avg_latency_ms=0.0,
-                error_rate=0.0,
-                total_tokens=0,
-                total_cost=0.0,
-            )
+            if variant_id not in self._results[test_id]:
+                self._results[test_id][variant_id] = ABTestResult(
+                    test_id=test_id,
+                    variant_id=variant_id,
+                    variant_name="",
+                    request_count=0,
+                    conversion_count=0,
+                    conversion_rate=0.0,
+                    avg_latency_ms=0.0,
+                    error_rate=0.0,
+                    total_tokens=0,
+                    total_cost=0.0,
+                )
 
-        result = self._results[test_id][variant_id]
-        result.request_count += request_count
-        result.conversion_count += conversion_count
-        result.total_tokens += tokens
-        result.total_cost += cost
+            result = self._results[test_id][variant_id]
+            result.request_count += request_count
+            result.conversion_count += conversion_count
+            result.total_tokens += tokens
+            result.total_cost += cost
 
-        # Recalculate rates
-        if result.request_count > 0:
-            result.conversion_rate = result.conversion_count / result.request_count
-            result.error_rate = error_count / result.request_count
+            # Recalculate rates
+            if result.request_count > 0:
+                result.conversion_rate = result.conversion_count / result.request_count
+                result.error_rate = error_count / result.request_count
 
-        # Update avg latency (simple running average)
-        if result.request_count == request_count:
-            result.avg_latency_ms = latency_ms
-        else:
-            result.avg_latency_ms = (
-                (result.avg_latency_ms * (result.request_count - request_count))
-                + latency_ms * request_count
-            ) / result.request_count
+            # Update avg latency (simple running average)
+            if result.request_count == request_count:
+                result.avg_latency_ms = latency_ms
+            else:
+                result.avg_latency_ms = (
+                    (result.avg_latency_ms * (result.request_count - request_count))
+                    + latency_ms * request_count
+                ) / result.request_count
 
-        # Set variant name from test
-        test = self._tests.get(test_id)
-        if test:
-            for v in test.variants:
-                if v.variant_id == variant_id:
-                    result.variant_name = v.name
-                    break
+            # Set variant name from test
+            test = self._tests.get(test_id)
+            if test:
+                for v in test.variants:
+                    if v.variant_id == variant_id:
+                        result.variant_name = v.name
+                        break
 
     # ------------------------------------------------------------------ #
     # Analysis                                                           #
@@ -381,57 +393,59 @@ class ABTestManager:
 
     def get_results(self, test_id: str) -> List[ABTestResult]:
         """Get results for all variants in a test."""
-        if test_id not in self._results:
-            return []
-        return list(self._results[test_id].values())
+        with self._lock:
+            if test_id not in self._results:
+                return []
+            return list(self._results[test_id].values())
 
     def analyze_test(self, test_id: str) -> Dict[str, Any]:
         """Analyze an A/B test and determine statistical significance."""
-        test = self._tests.get(test_id)
-        if test is None:
-            return {"error": f"Test {test_id} not found"}
+        with self._lock:
+            test = self._tests.get(test_id)
+            if test is None:
+                return {"error": f"Test {test_id} not found"}
 
-        results = self.get_results(test_id)
-        if len(results) < 2:
-            return {"error": "Need at least 2 variants for analysis"}
+            results = self.get_results(test_id)
+            if len(results) < 2:
+                return {"error": "Need at least 2 variants for analysis"}
 
-        control = next((r for r in results if r.variant_id == "control"), None)
-        treatment = next((r for r in results if r.variant_id == "treatment"), None)
+            control = next((r for r in results if r.variant_id == "control"), None)
+            treatment = next((r for r in results if r.variant_id == "treatment"), None)
 
-        if not control or not treatment:
-            return {"error": "Need both control and treatment variants"}
+            if not control or not treatment:
+                return {"error": "Need both control and treatment variants"}
 
-        # Simple lift calculation
-        conversion_lift = 0.0
-        if control.conversion_rate > 0:
-            conversion_lift = (
-                (treatment.conversion_rate - control.conversion_rate)
-                / control.conversion_rate
-                * 100
+            # Simple lift calculation
+            conversion_lift = 0.0
+            if control.conversion_rate > 0:
+                conversion_lift = (
+                    (treatment.conversion_rate - control.conversion_rate)
+                    / control.conversion_rate
+                    * 100
+                )
+
+            latency_change = 0.0
+            if control.avg_latency_ms > 0:
+                latency_change = (
+                    (treatment.avg_latency_ms - control.avg_latency_ms)
+                    / control.avg_latency_ms
+                    * 100
+                )
+
+            cost_change = 0.0
+            if control.total_cost > 0:
+                cost_change = (
+                    (treatment.total_cost - control.total_cost)
+                    / control.total_cost
+                    * 100
+                )
+
+            # Simple significance check (based on sample size)
+            min_samples = 100
+            significant = (
+                control.request_count >= min_samples
+                and treatment.request_count >= min_samples
             )
-
-        latency_change = 0.0
-        if control.avg_latency_ms > 0:
-            latency_change = (
-                (treatment.avg_latency_ms - control.avg_latency_ms)
-                / control.avg_latency_ms
-                * 100
-            )
-
-        cost_change = 0.0
-        if control.total_cost > 0:
-            cost_change = (
-                (treatment.total_cost - control.total_cost)
-                / control.total_cost
-                * 100
-            )
-
-        # Simple significance check (based on sample size)
-        min_samples = 100
-        significant = (
-            control.request_count >= min_samples
-            and treatment.request_count >= min_samples
-        )
 
         return {
             "test_id": test_id,
@@ -495,12 +509,15 @@ class ABTestManager:
 # --------------------------------------------------------------------------- #
 
 _ab_test_manager: Optional[ABTestManager] = None
+_ab_test_manager_lock = threading.Lock()
 
 
 def get_ab_test_manager() -> ABTestManager:
     global _ab_test_manager
     if _ab_test_manager is None:
-        _ab_test_manager = ABTestManager()
+        with _ab_test_manager_lock:
+            if _ab_test_manager is None:
+                _ab_test_manager = ABTestManager()
     return _ab_test_manager
 
 

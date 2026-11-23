@@ -19,6 +19,7 @@ Usage:
 import enum
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,6 +118,7 @@ class PromotionPipeline:
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         self._requests: Dict[str, PromotionRequest] = {}
         self._current_stage: Dict[str, PromotionStage] = {}  # model_version -> stage
+        self._lock = threading.RLock()
         self._load()
 
     # ------------------------------------------------------------------ #
@@ -150,10 +152,11 @@ class PromotionPipeline:
     def _save(self) -> None:
         import json as _json
 
-        tmp = self.storage_path.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump({rid: r.to_dict() for rid, r in self._requests.items()}, f, indent=2)
-        tmp.replace(self.storage_path)
+        with self._lock:
+            tmp = self.storage_path.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump({rid: r.to_dict() for rid, r in self._requests.items()}, f, indent=2)
+            tmp.replace(self.storage_path)
 
     # ------------------------------------------------------------------ #
     # Gate evaluation                                                    #
@@ -203,37 +206,38 @@ class PromotionPipeline:
         """Request a model promotion through stages."""
         import uuid
 
-        request_id = f"promo-{uuid.uuid4().hex[:12]}"
-        gate_results = self._evaluate_gates(model_version, to_stage)
+        with self._lock:
+            request_id = f"promo-{uuid.uuid4().hex[:12]}"
+            gate_results = self._evaluate_gates(model_version, to_stage)
 
-        # Auto-approve if all required gates pass
-        status = PromotionStatus.PENDING
-        approved_by = None
-        approved_at = None
+            # Auto-approve if all required gates pass
+            status = PromotionStatus.PENDING
+            approved_by = None
+            approved_at = None
 
-        if auto_approve and all(gate_results.values()):
-            status = PromotionStatus.APPROVED
-            approved_by = "system"
-            approved_at = time.time()
+            if auto_approve and all(gate_results.values()):
+                status = PromotionStatus.APPROVED
+                approved_by = "system"
+                approved_at = time.time()
 
-        request = PromotionRequest(
-            request_id=request_id,
-            model_version=model_version,
-            from_stage=from_stage,
-            to_stage=to_stage,
-            requested_by=requested_by,
-            requested_at=time.time(),
-            status=status,
-            approved_by=approved_by,
-            approved_at=approved_at,
-            gate_results=gate_results,
-            notes=notes,
-        )
+            request = PromotionRequest(
+                request_id=request_id,
+                model_version=model_version,
+                from_stage=from_stage,
+                to_stage=to_stage,
+                requested_by=requested_by,
+                requested_at=time.time(),
+                status=status,
+                approved_by=approved_by,
+                approved_at=approved_at,
+                gate_results=gate_results,
+                notes=notes,
+            )
 
-        self._requests[request_id] = request
-        self._save()
+            self._requests[request_id] = request
+            self._save()
 
-        # Alert on promotion request
+        # Alert on promotion request (outside lock to avoid blocking)
         if self.alert_manager:
             self.alert_manager.send_info(
                 f"Model promotion requested: {model_version} {from_stage.value} -> {to_stage.value}",
@@ -252,23 +256,25 @@ class PromotionPipeline:
         self, request_id: str, approved_by: str
     ) -> Optional[PromotionRequest]:
         """Approve a pending promotion request."""
-        request = self._requests.get(request_id)
-        if request is None:
-            return None
-        if request.status != PromotionStatus.PENDING:
-            return None
+        with self._lock:
+            request = self._requests.get(request_id)
+            if request is None:
+                return None
+            if request.status != PromotionStatus.PENDING:
+                return None
 
-        # Verify all gates pass
-        if not all(request.gate_results.values()):
-            request.status = PromotionStatus.REJECTED
+            # Verify all gates pass
+            if not all(request.gate_results.values()):
+                request.status = PromotionStatus.REJECTED
+                self._save()
+                return request
+
+            request.status = PromotionStatus.APPROVED
+            request.approved_by = approved_by
+            request.approved_at = time.time()
             self._save()
-            return request
 
-        request.status = PromotionStatus.APPROVED
-        request.approved_by = approved_by
-        request.approved_at = time.time()
-        self._save()
-
+        # Alert outside lock
         if self.alert_manager:
             self.alert_manager.send_info(
                 f"Model promotion approved: {request.model_version} {request.from_stage.value} -> {request.to_stage.value}",
@@ -282,69 +288,65 @@ class PromotionPipeline:
         self, request_id: str
     ) -> Optional[PromotionRequest]:
         """Deploy an approved promotion (update model registry status)."""
-        request = self._requests.get(request_id)
-        if request is None:
-            return None
-        if request.status != PromotionStatus.APPROVED:
-            return None
+        with self._lock:
+            request = self._requests.get(request_id)
+            if request is None:
+                return None
+            if request.status != PromotionStatus.APPROVED:
+                return None
 
-        try:
-            if request.to_stage == PromotionStage.CANARY:
-                self.model_registry.set_canary(request.model_version, traffic_percent=10)
-            elif request.to_stage == PromotionStage.PRODUCTION:
-                self.model_registry.promote_canary()
+            try:
+                if request.to_stage == PromotionStage.CANARY:
+                    self.model_registry.set_canary(request.model_version, traffic_percent=10)
+                elif request.to_stage == PromotionStage.PRODUCTION:
+                    self.model_registry.promote_canary()
 
-            request.status = PromotionStatus.DEPLOYED
-            request.deployed_at = time.time()
-            self._current_stage[request.model_version] = request.to_stage
-            self._save()
+                request.status = PromotionStatus.DEPLOYED
+                request.deployed_at = time.time()
+                self._current_stage[request.model_version] = request.to_stage
+                self._save()
 
-            if self.alert_manager:
-                self.alert_manager.send_info(
-                    f"Model promotion deployed: {request.model_version} -> {request.to_stage.value}",
-                    source="model-promotion",
-                    details={"request_id": request_id},
-                )
+                return request
+            except Exception as e:  # noqa BLE001
+                request.status = PromotionStatus.FAILED
+                self._save()
 
-            return request
-        except Exception as e:  # noqa BLE001
-            request.status = PromotionStatus.FAILED
-            self._save()
-
-            if self.alert_manager:
-                self.alert_manager.send_critical(
-                    f"Model promotion deployment failed: {request.model_version}",
-                    source="model-promotion",
-                    details={"request_id": request_id, "error": str(e)},
-                )
-            return None
+                if self.alert_manager:
+                    self.alert_manager.send_critical(
+                        f"Model promotion deployment failed: {request.model_version}",
+                        source="model-promotion",
+                        details={"request_id": request_id, "error": str(e)},
+                    )
+                return None
 
     def rollback(
         self, model_version: str, reason: str = "manual"
     ) -> Optional[PromotionRequest]:
         """Rollback a deployed model version."""
-        # Find the most recent deployed request for this version
-        deployed_requests = [
-            r
-            for r in self._requests.values()
-            if r.model_version == model_version
-            and r.status == PromotionStatus.DEPLOYED
-        ]
-        if not deployed_requests:
-            return None
+        with self._lock:
+            # Find the most recent deployed request for this version
+            deployed_requests = [
+                r
+                for r in self._requests.values()
+                if r.model_version == model_version
+                and r.status == PromotionStatus.DEPLOYED
+            ]
+            if not deployed_requests:
+                return None
 
-        request = deployed_requests[-1]
-        request.status = PromotionStatus.ROLLED_BACK
-        request.rollback_at = time.time()
-        request.notes = (request.notes or "") + f" | Rollback: {reason}"
-        self._save()
+            request = deployed_requests[-1]
+            request.status = PromotionStatus.ROLLED_BACK
+            request.rollback_at = time.time()
+            request.notes = (request.notes or "") + f" | Rollback: {reason}"
+            self._save()
 
-        # Demote in model registry
-        try:
-            self.model_registry.rollback()
-        except Exception as e:  # noqa BLE001
-            pass
+            # Demote in model registry
+            try:
+                self.model_registry.rollback()
+            except Exception as e:  # noqa BLE001
+                pass
 
+        # Alert outside lock
         if self.alert_manager:
             self.alert_manager.send_warning(
                 f"Model promotion rolled back: {model_version}",
@@ -359,23 +361,27 @@ class PromotionPipeline:
     # ------------------------------------------------------------------ #
 
     def get_request(self, request_id: str) -> Optional[PromotionRequest]:
-        return self._requests.get(request_id)
+        with self._lock:
+            return self._requests.get(request_id)
 
     def list_requests(
         self, model_version: Optional[str] = None, status: Optional[PromotionStatus] = None
     ) -> List[PromotionRequest]:
-        results = list(self._requests.values())
-        if model_version:
-            results = [r for r in results if r.model_version == model_version]
-        if status:
-            results = [r for r in results if r.status == status]
-        return sorted(results, key=lambda r: r.requested_at, reverse=True)
+        with self._lock:
+            results = list(self._requests.values())
+            if model_version:
+                results = [r for r in results if r.model_version == model_version]
+            if status:
+                results = [r for r in results if r.status == status]
+            return sorted(results, key=lambda r: r.requested_at, reverse=True)
 
     def get_current_stage(self, model_version: str) -> Optional[PromotionStage]:
-        return self._current_stage.get(model_version)
+        with self._lock:
+            return self._current_stage.get(model_version)
 
     def get_all_stages(self) -> Dict[str, str]:
-        return {v: s.value for v, s in self._current_stage.items()}
+        with self._lock:
+            return {v: s.value for v, s in self._current_stage.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -383,12 +389,15 @@ class PromotionPipeline:
 # --------------------------------------------------------------------------- #
 
 _promotion_pipeline: Optional[PromotionPipeline] = None
+_promotion_pipeline_lock = threading.Lock()
 
 
 def get_promotion_pipeline() -> PromotionPipeline:
     global _promotion_pipeline
     if _promotion_pipeline is None:
-        _promotion_pipeline = PromotionPipeline()
+        with _promotion_pipeline_lock:
+            if _promotion_pipeline is None:
+                _promotion_pipeline = PromotionPipeline()
     return _promotion_pipeline
 
 

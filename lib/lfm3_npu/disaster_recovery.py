@@ -22,6 +22,7 @@ Usage:
 import enum
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,6 +114,7 @@ class DisasterRecoveryManager:
         self._regions: Dict[str, Region] = {}
         self._failover_history: List[FailoverEvent] = []
         self._current_failover: Optional[FailoverEvent] = None
+        self._lock = threading.RLock()
         self._load()
 
     # ------------------------------------------------------------------ #
@@ -127,33 +129,35 @@ class DisasterRecoveryManager:
 
             with open(self.storage_path, "r") as f:
                 data = _json.load(f)
-            for name, rdata in data.get("regions", {}).items():
-                rdata = dict(rdata)  # Don't mutate original
-                if isinstance(rdata.get("status"), str):
-                    rdata["status"] = RegionStatus(rdata["status"])
-                self._regions[name] = Region(**rdata)
-            for ev in data.get("failover_history", []):
-                ev = dict(ev)  # Don't mutate original
-                if isinstance(ev.get("status"), str):
-                    ev["status"] = FailoverStatus(ev["status"])
-                self._failover_history.append(FailoverEvent(**ev))
+            with self._lock:
+                for name, rdata in data.get("regions", {}).items():
+                    rdata = dict(rdata)  # Don't mutate original
+                    if isinstance(rdata.get("status"), str):
+                        rdata["status"] = RegionStatus(rdata["status"])
+                    self._regions[name] = Region(**rdata)
+                for ev in data.get("failover_history", []):
+                    ev = dict(ev)  # Don't mutate original
+                    if isinstance(ev.get("status"), str):
+                        ev["status"] = FailoverStatus(ev["status"])
+                    self._failover_history.append(FailoverEvent(**ev))
         except (_json.JSONDecodeError, OSError):
             pass
 
     def _save(self) -> None:
         import json as _json
 
-        tmp = self.storage_path.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(
-                {
-                    "regions": {n: r.to_dict() for n, r in self._regions.items()},
-                    "failover_history": [e.to_dict() for e in self._failover_history],
-                },
-                f,
-                indent=2,
-            )
-        tmp.replace(self.storage_path)
+        with self._lock:
+            tmp = self.storage_path.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(
+                    {
+                        "regions": {n: r.to_dict() for n, r in self._regions.items()},
+                        "failover_history": [e.to_dict() for e in self._failover_history],
+                    },
+                    f,
+                    indent=2,
+                )
+            tmp.replace(self.storage_path)
 
     # ------------------------------------------------------------------ #
     # Region management                                                  #
@@ -166,44 +170,50 @@ class DisasterRecoveryManager:
         endpoint: Optional[str] = None,
     ) -> Region:
         """Add or update a region."""
-        region = Region(
-            name=name,
-            status=RegionStatus(status),
-            endpoint=endpoint,
-        )
-        self._regions[name] = region
-        self._save()
-        return region
+        with self._lock:
+            region = Region(
+                name=name,
+                status=RegionStatus(status),
+                endpoint=endpoint,
+            )
+            self._regions[name] = region
+            self._save()
+            return region
 
     def get_region(self, name: str) -> Optional[Region]:
-        return self._regions.get(name)
+        with self._lock:
+            return self._regions.get(name)
 
     def list_regions(self) -> List[Region]:
-        return list(self._regions.values())
+        with self._lock:
+            return list(self._regions.values())
 
     def get_primary(self) -> Optional[Region]:
-        for r in self._regions.values():
-            if r.status == RegionStatus.PRIMARY:
-                return r
-        return None
+        with self._lock:
+            for r in self._regions.values():
+                if r.status == RegionStatus.PRIMARY:
+                    return r
+            return None
 
     def get_secondaries(self) -> List[Region]:
-        return [r for r in self._regions.values() if r.status == RegionStatus.SECONDARY]
+        with self._lock:
+            return [r for r in self._regions.values() if r.status == RegionStatus.SECONDARY]
 
     def set_primary(self, name: str) -> Optional[Region]:
         """Set a region as primary (demotes current primary)."""
-        region = self._regions.get(name)
-        if region is None:
-            return None
+        with self._lock:
+            region = self._regions.get(name)
+            if region is None:
+                return None
 
-        # Demote current primary
-        for r in self._regions.values():
-            if r.status == RegionStatus.PRIMARY and r.name != name:
-                r.status = RegionStatus.SECONDARY
+            # Demote current primary
+            for r in self._regions.values():
+                if r.status == RegionStatus.PRIMARY and r.name != name:
+                    r.status = RegionStatus.SECONDARY
 
-        region.status = RegionStatus.PRIMARY
-        self._save()
-        return region
+            region.status = RegionStatus.PRIMARY
+            self._save()
+            return region
 
     # ------------------------------------------------------------------ #
     # Health checking                                                    #
@@ -211,9 +221,10 @@ class DisasterRecoveryManager:
 
     def check_region_health(self, name: str) -> bool:
         """Check health of a region via its health endpoint."""
-        region = self._regions.get(name)
-        if region is None or region.endpoint is None:
-            return False
+        with self._lock:
+            region = self._regions.get(name)
+            if region is None or region.endpoint is None:
+                return False
 
         try:
             req = urllib.request.Request(
@@ -235,8 +246,11 @@ class DisasterRecoveryManager:
 
     def check_all_regions(self) -> Dict[str, bool]:
         """Check health of all regions."""
+        with self._lock:
+            region_names = list(self._regions.keys())
+
         results = {}
-        for name in self._regions:
+        for name in region_names:
             results[name] = self.check_region_health(name)
         return results
 
@@ -252,36 +266,38 @@ class DisasterRecoveryManager:
         keys: Optional[bool] = None,
     ) -> Optional[Region]:
         """Update replication state for a region."""
-        region = self._regions.get(name)
-        if region is None:
-            return None
+        with self._lock:
+            region = self._regions.get(name)
+            if region is None:
+                return None
 
-        if models is not None:
-            region.models_replicated = models
-        if config is not None:
-            region.config_replicated = config
-        if keys is not None:
-            region.keys_replicated = keys
+            if models is not None:
+                region.models_replicated = models
+            if config is not None:
+                region.config_replicated = config
+            if keys is not None:
+                region.keys_replicated = keys
 
-        self._save()
-        return region
+            self._save()
+            return region
 
     def is_region_ready_for_failover(self, name: str) -> bool:
         """Check if a secondary region is ready to take over as primary."""
-        region = self._regions.get(name)
-        if region is None:
-            return False
-        if region.status != RegionStatus.SECONDARY:
-            return False
-        if not region.healthy:
-            return False
-        if not region.models_replicated:
-            return False
-        if not region.config_replicated:
-            return False
-        if not region.keys_replicated:
-            return False
-        return True
+        with self._lock:
+            region = self._regions.get(name)
+            if region is None:
+                return False
+            if region.status != RegionStatus.SECONDARY:
+                return False
+            if not region.healthy:
+                return False
+            if not region.models_replicated:
+                return False
+            if not region.config_replicated:
+                return False
+            if not region.keys_replicated:
+                return False
+            return True
 
     # ------------------------------------------------------------------ #
     # Failover                                                           #
@@ -291,51 +307,52 @@ class DisasterRecoveryManager:
         """Initiate failover to a secondary region."""
         import uuid
 
-        event_id = f"dr-{uuid.uuid4().hex[:12]}"
+        with self._lock:
+            event_id = f"dr-{uuid.uuid4().hex[:12]}"
 
-        current_primary = self.get_primary()
-        target = self._regions.get(to_region)
+            current_primary = self.get_primary()
+            target = self._regions.get(to_region)
 
-        if target is None:
-            raise ValueError(f"Region {to_region} not found")
+            if target is None:
+                raise ValueError(f"Region {to_region} not found")
 
-        if not self.is_region_ready_for_failover(to_region):
-            raise ValueError(f"Region {to_region} is not ready for failover")
+            if not self.is_region_ready_for_failover(to_region):
+                raise ValueError(f"Region {to_region} is not ready for failover")
 
-        event = FailoverEvent(
-            event_id=event_id,
-            from_region=current_primary.name if current_primary else "none",
-            to_region=to_region,
-            reason=reason,
-            started_at=time.time(),
-            status=FailoverStatus.IN_PROGRESS,
-        )
-        self._current_failover = event
-        self._failover_history.append(event)
-        self._save()
+            event = FailoverEvent(
+                event_id=event_id,
+                from_region=current_primary.name if current_primary else "none",
+                to_region=to_region,
+                reason=reason,
+                started_at=time.time(),
+                status=FailoverStatus.IN_PROGRESS,
+            )
+            self._current_failover = event
+            self._failover_history.append(event)
+            self._save()
 
-        try:
-            # Demote current primary
-            if current_primary:
-                current_primary.status = RegionStatus.FAILED
+            try:
+                # Demote current primary
+                if current_primary:
+                    current_primary.status = RegionStatus.FAILED
+                    self._save()
+
+                # Promote target
+                target.status = RegionStatus.PRIMARY
+                target.healthy = True
                 self._save()
 
-            # Promote target
-            target.status = RegionStatus.PRIMARY
-            target.healthy = True
-            self._save()
+                event.status = FailoverStatus.COMPLETED
+                event.completed_at = time.time()
+                self._save()
 
-            event.status = FailoverStatus.COMPLETED
-            event.completed_at = time.time()
-            self._save()
-
-            return event
-        except Exception as exc:  # noqa BLE001
-            event.status = FailoverStatus.FAILED
-            event.error = str(exc)
-            event.completed_at = time.time()
-            self._save()
-            raise
+                return event
+            except Exception as exc:  # noqa BLE001
+                event.status = FailoverStatus.FAILED
+                event.error = str(exc)
+                event.completed_at = time.time()
+                self._save()
+                raise
 
     def failback(self, to_region: str) -> FailoverEvent:
         """Fail back to a region (restore primary status)."""
@@ -347,25 +364,27 @@ class DisasterRecoveryManager:
 
     def get_status(self) -> Dict[str, Any]:
         """Get overall DR status."""
-        primary = self.get_primary()
-        secondaries = self.get_secondaries()
-        ready_secondaries = [
-            r.name for r in secondaries if self.is_region_ready_for_failover(r.name)
-        ]
+        with self._lock:
+            primary = self.get_primary()
+            secondaries = self.get_secondaries()
+            ready_secondaries = [
+                r.name for r in secondaries if self.is_region_ready_for_failover(r.name)
+            ]
 
-        return {
-            "primary": primary.name if primary else None,
-            "primary_healthy": primary.healthy if primary else False,
-            "secondaries": [r.name for r in secondaries],
-            "ready_secondaries": ready_secondaries,
-            "current_failover": self._current_failover.to_dict()
-            if self._current_failover
-            else None,
-            "total_failovers": len(self._failover_history),
-        }
+            return {
+                "primary": primary.name if primary else None,
+                "primary_healthy": primary.healthy if primary else False,
+                "secondaries": [r.name for r in secondaries],
+                "ready_secondaries": ready_secondaries,
+                "current_failover": self._current_failover.to_dict()
+                if self._current_failover
+                else None,
+                "total_failovers": len(self._failover_history),
+            }
 
     def get_failover_history(self) -> List[Dict[str, Any]]:
-        return [e.to_dict() for e in self._failover_history]
+        with self._lock:
+            return [e.to_dict() for e in self._failover_history]
 
 
 # --------------------------------------------------------------------------- #
@@ -373,12 +392,15 @@ class DisasterRecoveryManager:
 # --------------------------------------------------------------------------- #
 
 _dr_manager: Optional[DisasterRecoveryManager] = None
+_dr_manager_lock = threading.Lock()
 
 
 def get_dr_manager() -> DisasterRecoveryManager:
     global _dr_manager
     if _dr_manager is None:
-        _dr_manager = DisasterRecoveryManager()
+        with _dr_manager_lock:
+            if _dr_manager is None:
+                _dr_manager = DisasterRecoveryManager()
     return _dr_manager
 
 

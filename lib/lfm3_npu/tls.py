@@ -157,7 +157,9 @@ def generate_dev_certificates(force: bool = False) -> Tuple[bool, str]:
         CA_KEY.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
     # Server key + CSR (2048-bit, SANs for localhost/127.0.0.1)
-    csr_path = Path(tempfile.mktemp(suffix=".csr"))
+    csr_fd, csr_path = tempfile.mkstemp(suffix=".csr")
+    os.close(csr_fd)
+    csr_path = Path(csr_path)
     if force or not SERVER_KEY.exists():
         _run(
             [
@@ -182,7 +184,9 @@ def generate_dev_certificates(force: bool = False) -> Tuple[bool, str]:
         )
 
     # Sign server cert with CA (2 years, SANs)
-    ext_path = Path(tempfile.mktemp(suffix=".ext"))
+    ext_fd, ext_path = tempfile.mkstemp(suffix=".ext")
+    os.close(ext_fd)
+    ext_path = Path(ext_path)
     ext_path.write_text(
         "subjectAltName=DNS:localhost,DNS:127.0.0.1,DNS:xwing,IP:127.0.0.1\n"
         "extendedKeyUsage=serverAuth\n"

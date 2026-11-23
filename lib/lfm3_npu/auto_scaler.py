@@ -20,6 +20,7 @@ Usage:
 import enum
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,6 +128,7 @@ class AutoScaler:
         self._last_scale_up: Optional[float] = None
         self._last_scale_down: Optional[float] = None
         self._scaling_history: List[ScalingDecision] = []
+        self._lock = threading.Lock()
         self._load()
 
     # ------------------------------------------------------------------ #
@@ -141,27 +143,29 @@ class AutoScaler:
 
             with open(self.storage_path, "r") as f:
                 data = _json.load(f)
-            self._current_replicas = data.get("current_replicas", self.policy.min_replicas)
-            self._last_scale_up = data.get("last_scale_up")
-            self._last_scale_down = data.get("last_scale_down")
+            with self._lock:
+                self._current_replicas = data.get("current_replicas", self.policy.min_replicas)
+                self._last_scale_up = data.get("last_scale_up")
+                self._last_scale_down = data.get("last_scale_down")
         except (_json.JSONDecodeError, OSError):
             pass
 
     def _save(self) -> None:
         import json as _json
 
-        tmp = self.storage_path.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(
-                {
-                    "current_replicas": self._current_replicas,
-                    "last_scale_up": self._last_scale_up,
-                    "last_scale_down": self._last_scale_down,
-                },
-                f,
-                indent=2,
-            )
-        tmp.replace(self.storage_path)
+        with self._lock:
+            tmp = self.storage_path.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(
+                    {
+                        "current_replicas": self._current_replicas,
+                        "last_scale_up": self._last_scale_up,
+                        "last_scale_down": self._last_scale_down,
+                    },
+                    f,
+                    indent=2,
+                )
+            tmp.replace(self.storage_path)
 
     # ------------------------------------------------------------------ #
     # Policy management                                                  #
@@ -276,60 +280,65 @@ class AutoScaler:
                 reasons.append("All metrics well below thresholds")
 
         # Make decision
-        if scale_up and self._can_scale_up():
-            target = min(self._current_replicas + 1, self.policy.max_replicas)
-            action = ScalingAction.SCALE_UP
-            self._current_replicas = target
-            self._last_scale_up = time.time()
-            reason = "; ".join(reasons)
-        elif scale_down and self._can_scale_down():
-            target = max(self._current_replicas - 1, self.policy.min_replicas)
-            action = ScalingAction.SCALE_DOWN
-            self._current_replicas = target
-            self._last_scale_down = time.time()
-            reason = "; ".join(reasons)
-        else:
-            target = self._current_replicas
-            action = ScalingAction.NO_CHANGE
-            reason = "Metrics within acceptable range" if not reasons else "; ".join(reasons)
+        with self._lock:
+            if scale_up and self._can_scale_up():
+                target = min(self._current_replicas + 1, self.policy.max_replicas)
+                action = ScalingAction.SCALE_UP
+                self._current_replicas = target
+                self._last_scale_up = time.time()
+                reason = "; ".join(reasons)
+            elif scale_down and self._can_scale_down():
+                target = max(self._current_replicas - 1, self.policy.min_replicas)
+                action = ScalingAction.SCALE_DOWN
+                self._current_replicas = target
+                self._last_scale_down = time.time()
+                reason = "; ".join(reasons)
+            else:
+                target = self._current_replicas
+                action = ScalingAction.NO_CHANGE
+                reason = "Metrics within acceptable range" if not reasons else "; ".join(reasons)
 
-        decision = ScalingDecision(
-            action=action,
-            current_replicas=self._current_replicas,
-            target_replicas=target,
-            reason=reason,
-            metrics=metrics,
-        )
+            decision = ScalingDecision(
+                action=action,
+                current_replicas=self._current_replicas,
+                target_replicas=target,
+                reason=reason,
+                metrics=metrics,
+            )
 
-        self._scaling_history.append(decision)
-        # Keep only last 1000 decisions
-        if len(self._scaling_history) > 1000:
-            self._scaling_history = self._scaling_history[-1000:]
+            self._scaling_history.append(decision)
+            # Keep only last 1000 decisions
+            if len(self._scaling_history) > 1000:
+                self._scaling_history = self._scaling_history[-1000:]
 
         self._save()
         return decision
 
     def scale_up(self) -> int:
         """Manually scale up by one replica."""
-        if self._current_replicas >= self.policy.max_replicas:
-            return self._current_replicas
-        self._current_replicas += 1
-        self._last_scale_up = time.time()
-        self._record_manual_scale(ScalingAction.SCALE_UP, "manual scale-up")
+        with self._lock:
+            if self._current_replicas >= self.policy.max_replicas:
+                return self._current_replicas
+            self._current_replicas += 1
+            self._last_scale_up = time.time()
+            self._record_manual_scale_locked(ScalingAction.SCALE_UP, "manual scale-up")
+
         self._save()
         return self._current_replicas
 
     def scale_down(self) -> int:
         """Manually scale down by one replica."""
-        if self._current_replicas <= self.policy.min_replicas:
-            return self._current_replicas
-        self._current_replicas -= 1
-        self._last_scale_down = time.time()
-        self._record_manual_scale(ScalingAction.SCALE_DOWN, "manual scale-down")
+        with self._lock:
+            if self._current_replicas <= self.policy.min_replicas:
+                return self._current_replicas
+            self._current_replicas -= 1
+            self._last_scale_down = time.time()
+            self._record_manual_scale_locked(ScalingAction.SCALE_DOWN, "manual scale-down")
+
         self._save()
         return self._current_replicas
 
-    def _record_manual_scale(self, action: ScalingAction, reason: str) -> None:
+    def _record_manual_scale_locked(self, action: ScalingAction, reason: str) -> None:
         """Record a manual scaling operation in history."""
         metrics = ScalingMetrics(active_replicas=self._current_replicas)
         decision = ScalingDecision(
@@ -348,17 +357,19 @@ class AutoScaler:
     # ------------------------------------------------------------------ #
 
     def get_status(self) -> Dict[str, Any]:
-        return {
-            "current_replicas": self._current_replicas,
-            "min_replicas": self.policy.min_replicas,
-            "max_replicas": self.policy.max_replicas,
-            "last_scale_up": self._last_scale_up,
-            "last_scale_down": self._last_scale_down,
-            "policy": self.policy.to_dict(),
-        }
+        with self._lock:
+            return {
+                "current_replicas": self._current_replicas,
+                "min_replicas": self.policy.min_replicas,
+                "max_replicas": self.policy.max_replicas,
+                "last_scale_up": self._last_scale_up,
+                "last_scale_down": self._last_scale_down,
+                "policy": self.policy.to_dict(),
+            }
 
     def get_scaling_history(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return [d.to_dict() for d in self._scaling_history[-limit:]]
+        with self._lock:
+            return [d.to_dict() for d in self._scaling_history[-limit:]]
 
 
 # --------------------------------------------------------------------------- #
@@ -366,12 +377,15 @@ class AutoScaler:
 # --------------------------------------------------------------------------- #
 
 _auto_scaler: Optional[AutoScaler] = None
+_auto_scaler_lock = threading.Lock()
 
 
 def get_auto_scaler() -> AutoScaler:
     global _auto_scaler
     if _auto_scaler is None:
-        _auto_scaler = AutoScaler()
+        with _auto_scaler_lock:
+            if _auto_scaler is None:
+                _auto_scaler = AutoScaler()
     return _auto_scaler
 
 
