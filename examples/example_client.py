@@ -22,7 +22,7 @@ def main():
         print(f"Health: {health}")
     except Exception as e:
         print(f"Server not reachable: {e}")
-        print("Start the server first: lfm3-npu-server-mgr start npu")
+        print("Start the server first: lfm3-npu server start npu")
         return 1
 
     models = client.list_models()

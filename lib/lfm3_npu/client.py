@@ -502,5 +502,5 @@ if __name__ == "__main__":
         print(f"Response: {response}")
     except LFM3ClientError as e:
         print(f"Error: {e}")
-        print("Make sure the server is running: lfm3-npu-server-mgr start npu")
+        print("Make sure the server is running: lfm3-npu server start npu")
         sys.exit(1)

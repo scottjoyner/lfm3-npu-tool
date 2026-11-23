@@ -1,4 +1,4 @@
-FROM ubuntu:26.04
+FROM ubuntu:26.04 as base
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
