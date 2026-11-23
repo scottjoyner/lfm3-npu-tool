@@ -1012,10 +1012,11 @@ async def metrics_endpoint(request: Request, _=Depends(verify_api_key)):
     text += "\n# Circuit breaker metrics\n"
     text += circuit_breaker_prometheus_metrics()
     text += "\n# Enterprise metrics\n"
-    ent_metrics_text = _enterprise_metrics.get_metrics()
-    if isinstance(ent_metrics_text, bytes):
-        ent_metrics_text = ent_metrics_text.decode("utf-8")
-    text += ent_metrics_text
+    if _enterprise_metrics:
+        ent_metrics_text = _enterprise_metrics.get_metrics()
+        if isinstance(ent_metrics_text, bytes):
+            ent_metrics_text = ent_metrics_text.decode("utf-8")
+        text += ent_metrics_text
     return PlainTextResponse(content=text, media_type=metrics.get_content_type())
 
 

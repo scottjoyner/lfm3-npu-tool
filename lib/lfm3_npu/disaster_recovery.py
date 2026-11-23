@@ -128,8 +128,14 @@ class DisasterRecoveryManager:
             with open(self.storage_path, "r") as f:
                 data = _json.load(f)
             for name, rdata in data.get("regions", {}).items():
+                rdata = dict(rdata)  # Don't mutate original
+                if isinstance(rdata.get("status"), str):
+                    rdata["status"] = RegionStatus(rdata["status"])
                 self._regions[name] = Region(**rdata)
             for ev in data.get("failover_history", []):
+                ev = dict(ev)  # Don't mutate original
+                if isinstance(ev.get("status"), str):
+                    ev["status"] = FailoverStatus(ev["status"])
                 self._failover_history.append(FailoverEvent(**ev))
         except (_json.JSONDecodeError, OSError):
             pass

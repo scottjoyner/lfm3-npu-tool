@@ -132,6 +132,14 @@ class PromotionPipeline:
             with open(self.storage_path, "r") as f:
                 data = _json.load(f)
             for rid, rdata in data.items():
+                # Convert string enum values back to enum types
+                rdata = dict(rdata)  # Don't mutate original
+                if isinstance(rdata.get("from_stage"), str):
+                    rdata["from_stage"] = PromotionStage(rdata["from_stage"])
+                if isinstance(rdata.get("to_stage"), str):
+                    rdata["to_stage"] = PromotionStage(rdata["to_stage"])
+                if isinstance(rdata.get("status"), str):
+                    rdata["status"] = PromotionStatus(rdata["status"])
                 self._requests[rid] = PromotionRequest(**rdata)
             for rid, req in self._requests.items():
                 if req.status == PromotionStatus.DEPLOYED:

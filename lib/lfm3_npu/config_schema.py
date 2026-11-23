@@ -178,7 +178,7 @@ class ModelPromotionModel(BaseModel):
 
 class DRRegionModel(BaseModel):
     name: str
-    status: str = Field(default="secondary")
+    status: str = Field(default="secondary", pattern="^(primary|secondary|failed|recovering)$")
     endpoint: Optional[str] = None
 
 
@@ -200,6 +200,14 @@ class AutoScalingModel(BaseModel):
     scale_down_cooldown_seconds: int = Field(default=300, ge=0)
     evaluation_interval_seconds: int = Field(default=30, ge=1)
 
+    @model_validator(mode="after")
+    def _validate_replicas(self) -> "AutoScalingModel":
+        if self.min_replicas > self.max_replicas:
+            raise ValueError(
+                f"min_replicas ({self.min_replicas}) must be <= max_replicas ({self.max_replicas})"
+            )
+        return self
+
 
 class ABTestingModel(BaseModel):
     storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/ab_tests.json")
@@ -210,13 +218,23 @@ class CostTrackingModel(BaseModel):
     default_tier: str = Field(default="standard")
     pricing_tiers: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _validate_pricing_tiers(self) -> "CostTrackingModel":
+        for tier, pricing in self.pricing_tiers.items():
+            for key, value in pricing.items():
+                if value < 0:
+                    raise ValueError(f"pricing_tiers.{tier}.{key} must be >= 0, got {value}")
+        return self
+
 
 class AlertingModel(BaseModel):
     storage_path: str = Field(default="/media/scott/data/lfm3-npu-tool/var/alerts.json")
     webhook_url: str = Field(default="")
     slack_webhook: str = Field(default="")
     pagerduty_key: str = Field(default="")
-    severity_levels: List[str] = Field(default_factory=lambda: ["info", "warning", "critical"])
+    severity_levels: List[str] = Field(
+        default_factory=lambda: ["info", "warning", "critical"], min_items=1
+    )
 
 
 class SecurityScanModel(BaseModel):
@@ -227,9 +245,9 @@ class SecurityScanModel(BaseModel):
 
 class KeyRotationPolicyModel(BaseModel):
     name: str
-    max_age_days: Optional[int] = None
-    max_usage_count: Optional[int] = None
-    max_cost_usd: Optional[float] = None
+    max_age_days: Optional[int] = Field(default=None, ge=0)
+    max_usage_count: Optional[int] = Field(default=None, ge=0)
+    max_cost_usd: Optional[float] = Field(default=None, ge=0.0)
 
 
 class KeyRotationModel(BaseModel):
