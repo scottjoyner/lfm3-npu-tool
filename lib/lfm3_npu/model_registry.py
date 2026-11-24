@@ -29,6 +29,7 @@ Header: X-Model-Version (override routing for specific requests)
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -106,6 +107,7 @@ class ModelRegistry:
         self.storage_path = Path(storage_path)
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         self._models: Dict[str, ModelVersion] = {}  # keyed by version string
+        self._lock = threading.RLock()
         self._load()
 
     # ------------------------------------------------------------------ #
@@ -148,6 +150,43 @@ class ModelRegistry:
     # CRUD                                                               #
     # ------------------------------------------------------------------ #
 
+    def _load(self) -> None:
+        """Load model registry from disk."""
+        if not self.storage_path.exists():
+            self._create_default_model()
+            self._save()
+            return
+        try:
+            with open(self.storage_path, "r") as f:
+                data = json.load(f)
+            with self._lock:
+                for ver, mdata in data.items():
+                    self._models[ver] = ModelVersion.from_dict(mdata)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[ModelRegistry] Warning: could not load {self.storage_path}: {e}", flush=True)
+            self._create_default_model()
+
+    def _save(self) -> None:
+        """Save model registry to disk."""
+        tmp = self.storage_path.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump({ver: m.to_dict() for ver, m in self._models.items()}, f, indent=2)
+        tmp.replace(self.storage_path)
+
+    def _create_default_model(self) -> None:
+        """Create the default primary model."""
+        self._models["1.0.0"] = ModelVersion(
+            model_id=DEFAULT_MODEL_ID,
+            version="1.0.0",
+            status=MODEL_STATUS_PRIMARY,
+            traffic_percent=0,
+            notes="Initial production model",
+        )
+
+    # ------------------------------------------------------------------ #
+    # CRUD                                                               #
+    # ------------------------------------------------------------------ #
+
     def register_model(
         self,
         version: str,
@@ -160,30 +199,33 @@ class ModelRegistry:
         status: str = MODEL_STATUS_PENDING,
     ) -> ModelVersion:
         """Register a new model version."""
-        if version in self._models:
-            raise ValueError(f"Model version '{version}' already exists")
-        if status not in (MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY,
-                          MODEL_STATUS_DEPRECATED, MODEL_STATUS_PENDING):
-            raise ValueError(f"Invalid status '{status}'")
-        model = ModelVersion(
-            model_id=model_id,
-            version=version,
-            status=status,
-            model_path=model_path,
-            tokenizer_path=tokenizer_path,
-            provider=provider,
-            checksum=checksum,
-            notes=notes,
-        )
-        self._models[version] = model
-        self._save()
-        return model
+        with self._lock:
+            if version in self._models:
+                raise ValueError(f"Model version '{version}' already exists")
+            if status not in (MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY,
+                              MODEL_STATUS_DEPRECATED, MODEL_STATUS_PENDING):
+                raise ValueError(f"Invalid status '{status}'")
+            model = ModelVersion(
+                model_id=model_id,
+                version=version,
+                status=status,
+                model_path=model_path,
+                tokenizer_path=tokenizer_path,
+                provider=provider,
+                checksum=checksum,
+                notes=notes,
+            )
+            self._models[version] = model
+            self._save()
+            return model
 
     def get_model(self, version: str) -> Optional[ModelVersion]:
-        return self._models.get(version)
+        with self._lock:
+            return self._models.get(version)
 
     def list_models(self) -> List[ModelVersion]:
-        return sorted(self._models.values(), key=lambda m: m.created_at, reverse=True)
+        with self._lock:
+            return sorted(self._models.values(), key=lambda m: m.created_at, reverse=True)
 
     def update_model(
         self,
@@ -196,39 +238,41 @@ class ModelRegistry:
         notes: Optional[str] = None,
         status: Optional[str] = None,
     ) -> Optional[ModelVersion]:
-        model = self._models.get(version)
-        if model is None:
-            return None
-        if model_id is not None:
-            model.model_id = model_id
-        if model_path is not None:
-            model.model_path = model_path
-        if tokenizer_path is not None:
-            model.tokenizer_path = tokenizer_path
-        if provider is not None:
-            model.provider = provider
-        if checksum is not None:
-            model.checksum = checksum
-        if notes is not None:
-            model.notes = notes
-        if status is not None:
-            if status not in (MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY,
-                              MODEL_STATUS_DEPRECATED, MODEL_STATUS_PENDING):
-                raise ValueError(f"Invalid status '{status}'")
-            model.status = status
-        model.updated_at = time.time()
-        self._save()
-        return model
+        with self._lock:
+            model = self._models.get(version)
+            if model is None:
+                return None
+            if model_id is not None:
+                model.model_id = model_id
+            if model_path is not None:
+                model.model_path = model_path
+            if tokenizer_path is not None:
+                model.tokenizer_path = tokenizer_path
+            if provider is not None:
+                model.provider = provider
+            if checksum is not None:
+                model.checksum = checksum
+            if notes is not None:
+                model.notes = notes
+            if status is not None:
+                if status not in (MODEL_STATUS_PRIMARY, MODEL_STATUS_CANARY,
+                                  MODEL_STATUS_DEPRECATED, MODEL_STATUS_PENDING):
+                    raise ValueError(f"Invalid status '{status}'")
+                model.status = status
+            model.updated_at = time.time()
+            self._save()
+            return model
 
     def delete_model(self, version: str) -> bool:
-        model = self._models.get(version)
-        if model is None:
-            return False
-        if model.is_primary:
-            raise ValueError("Cannot delete the primary model version")
-        del self._models[version]
-        self._save()
-        return True
+        with self._lock:
+            model = self._models.get(version)
+            if model is None:
+                return False
+            if model.is_primary:
+                raise ValueError("Cannot delete the primary model version")
+            del self._models[version]
+            self._save()
+            return True
 
     # ------------------------------------------------------------------ #
     # Canary routing                                                     #
@@ -236,17 +280,19 @@ class ModelRegistry:
 
     def get_primary(self) -> Optional[ModelVersion]:
         """Get the current primary model version."""
-        for m in self._models.values():
-            if m.is_primary:
-                return m
-        return None
+        with self._lock:
+            for m in self._models.values():
+                if m.is_primary:
+                    return m
+            return None
 
     def get_canary(self) -> Optional[ModelVersion]:
         """Get the current canary model version (if any)."""
-        for m in self._models.values():
-            if m.is_canary:
-                return m
-        return None
+        with self._lock:
+            for m in self._models.values():
+                if m.is_canary:
+                    return m
+            return None
 
     def set_canary(
         self,
@@ -257,22 +303,23 @@ class ModelRegistry:
         if not 0 <= traffic_percent <= 100:
             raise ValueError("traffic_percent must be between 0 and 100")
 
-        # Remove existing canary
-        for m in self._models.values():
-            if m.is_canary:
-                m.status = MODEL_STATUS_PENDING
-                m.traffic_percent = 0
-                m.updated_at = time.time()
+        with self._lock:
+            # Remove existing canary
+            for m in self._models.values():
+                if m.is_canary:
+                    m.status = MODEL_STATUS_PENDING
+                    m.traffic_percent = 0
+                    m.updated_at = time.time()
 
-        # Set new canary
-        model = self._models.get(version)
-        if model is None:
-            raise ValueError(f"Model version '{version}' not found")
-        model.status = MODEL_STATUS_CANARY
-        model.traffic_percent = traffic_percent
-        model.updated_at = time.time()
-        self._save()
-        return model
+            # Set new canary
+            model = self._models.get(version)
+            if model is None:
+                raise ValueError(f"Model version '{version}' not found")
+            model.status = MODEL_STATUS_CANARY
+            model.traffic_percent = traffic_percent
+            model.updated_at = time.time()
+            self._save()
+            return model
 
     def resolve_model_version(
         self,
@@ -286,72 +333,75 @@ class ModelRegistry:
           2. If canary is configured, roll dice based on traffic_percent
           3. Otherwise, use primary
         """
-        # Explicit version override
-        if requested_version:
-            model = self._models.get(requested_version)
-            if model and not model.is_deprecated:
-                return model
+        with self._lock:
+            # Explicit version override
+            if requested_version:
+                model = self._models.get(requested_version)
+                if model and not model.is_deprecated:
+                    return model
 
-        # Canary traffic split
-        canary = self.get_canary()
-        if canary and canary.traffic_percent > 0:
-            import random
-            if random.randint(1, 100) <= canary.traffic_percent:
-                return canary
+            # Canary traffic split
+            canary = self.get_canary()
+            if canary and canary.traffic_percent > 0:
+                import random
+                if random.randint(1, 100) <= canary.traffic_percent:
+                    return canary
 
-        # Default to primary
-        return self.get_primary()
+            # Default to primary
+            return self.get_primary()
 
     def promote_canary(self) -> Optional[ModelVersion]:
         """Promote the canary model to primary. Returns the new primary."""
-        canary = self.get_canary()
-        if canary is None:
-            raise ValueError("No canary model to promote")
+        with self._lock:
+            canary = self.get_canary()
+            if canary is None:
+                raise ValueError("No canary model to promote")
 
-        # Demote current primary
-        primary = self.get_primary()
-        if primary:
-            primary.status = MODEL_STATUS_DEPRECATED
-            primary.updated_at = time.time()
+            # Demote current primary
+            primary = self.get_primary()
+            if primary:
+                primary.status = MODEL_STATUS_DEPRECATED
+                primary.updated_at = time.time()
 
-        # Promote canary to primary
-        canary.status = MODEL_STATUS_PRIMARY
-        canary.traffic_percent = 0
-        canary.updated_at = time.time()
-        self._save()
-        return canary
+            # Promote canary to primary
+            canary.status = MODEL_STATUS_PRIMARY
+            canary.traffic_percent = 0
+            canary.updated_at = time.time()
+            self._save()
+            return canary
 
     def rollback(self) -> Optional[ModelVersion]:
         """
         Rollback: demote current primary to deprecated, promote the most
         recent non-deprecated version to primary.
         """
-        primary = self.get_primary()
-        if primary is None:
-            raise ValueError("No primary model to rollback from")
+        with self._lock:
+            primary = self.get_primary()
+            if primary is None:
+                raise ValueError("No primary model to rollback from")
 
-        # Find previous primary (deprecated versions sorted by updated_at)
-        deprecated = sorted(
-            [m for m in self._models.values() if m.is_deprecated],
-            key=lambda m: m.updated_at,
-            reverse=True,
-        )
+            # Find previous primary (deprecated versions sorted by updated_at)
+            deprecated = sorted(
+                [m for m in self._models.values() if m.is_deprecated],
+                key=lambda m: m.updated_at,
+                reverse=True,
+            )
 
-        # Demote current primary
-        primary.status = MODEL_STATUS_DEPRECATED
-        primary.updated_at = time.time()
+            # Demote current primary
+            primary.status = MODEL_STATUS_DEPRECATED
+            primary.updated_at = time.time()
 
-        # Promote most recent deprecated version back to primary
-        if deprecated:
-            previous = deprecated[0]
-            previous.status = MODEL_STATUS_PRIMARY
-            previous.updated_at = time.time()
+            # Promote most recent deprecated version back to primary
+            if deprecated:
+                previous = deprecated[0]
+                previous.status = MODEL_STATUS_PRIMARY
+                previous.updated_at = time.time()
+                self._save()
+                return previous
+
+            # No previous version - just demote, no primary
             self._save()
-            return previous
-
-        # No previous version - just demote, no primary
-        self._save()
-        return None
+            return None
 
     # ------------------------------------------------------------------ #
     # Metrics                                                            #
@@ -364,31 +414,33 @@ class ModelRegistry:
         error: bool = False,
     ) -> None:
         """Record a request metric for a model version."""
-        model = self._models.get(version)
-        if model:
-            model.total_requests += 1
-            if error:
-                model.total_errors += 1
-            model.total_latency_ms += latency_ms
-            model.updated_at = time.time()
-            self._save()
+        with self._lock:
+            model = self._models.get(version)
+            if model:
+                model.total_requests += 1
+                if error:
+                    model.total_errors += 1
+                model.total_latency_ms += latency_ms
+                model.updated_at = time.time()
+                self._save()
 
     def get_model_metrics(self, version: str) -> Optional[Dict[str, Any]]:
-        model = self._models.get(version)
-        if model is None:
-            return None
-        return {
-            "version": model.version,
-            "model_id": model.model_id,
-            "status": model.status,
-            "traffic_percent": model.traffic_percent,
-            "total_requests": model.total_requests,
-            "total_errors": model.total_errors,
-            "error_rate": round(model.error_rate, 4),
-            "avg_latency_ms": round(model.avg_latency_ms, 2),
-            "created_at": model.created_at,
-            "updated_at": model.updated_at,
-        }
+        with self._lock:
+            model = self._models.get(version)
+            if model is None:
+                return None
+            return {
+                "version": model.version,
+                "model_id": model.model_id,
+                "status": model.status,
+                "traffic_percent": model.traffic_percent,
+                "total_requests": model.total_requests,
+                "total_errors": model.total_errors,
+                "error_rate": round(model.error_rate, 4),
+                "avg_latency_ms": round(model.avg_latency_ms, 2),
+                "created_at": model.created_at,
+                "updated_at": model.updated_at,
+            }
 
 
 # --------------------------------------------------------------------------- #
@@ -396,10 +448,13 @@ class ModelRegistry:
 # --------------------------------------------------------------------------- #
 
 _model_registry: Optional[ModelRegistry] = None
+_model_registry_lock = threading.Lock()
 
 
 def get_model_registry() -> ModelRegistry:
     global _model_registry
     if _model_registry is None:
-        _model_registry = ModelRegistry()
+        with _model_registry_lock:
+            if _model_registry is None:
+                _model_registry = ModelRegistry()
     return _model_registry

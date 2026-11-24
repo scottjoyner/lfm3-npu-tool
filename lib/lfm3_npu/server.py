@@ -146,10 +146,10 @@ class ServerManager:
     def _http_health(self, host: str, port: int, path: str = "/health") -> bool:
         """Check HTTP health endpoint."""
         try:
-            req = urllib.request.urlopen(
+            with urllib.request.urlopen(
                 f"http://{host}:{port}{path}", timeout=5
-            )
-            return req.status == 200
+            ) as req:
+                return req.status == 200
         except Exception:
             return False
 
@@ -321,12 +321,12 @@ class ServerManager:
                 entry["healthy"] = self._http_health(host, port, health_path)
                 if entry["healthy"]:
                     try:
-                        req = urllib.request.urlopen(
+                        with urllib.request.urlopen(
                             f"http://{host}:{port}{health_path}", timeout=5
-                        )
-                        import json
-                        data = json.loads(req.read().decode("utf-8"))
-                        entry["health_data"] = data
+                        ) as req:
+                            import json
+                            data = json.loads(req.read().decode("utf-8"))
+                            entry["health_data"] = data
                     except Exception:
                         pass
             else:
