@@ -75,7 +75,8 @@ class Watchdog:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=10)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
         except Exception:
             pass  # Don't let webhook failures break the watchdog
 
@@ -118,10 +119,10 @@ class Watchdog:
             return False
 
         try:
-            req = urllib.request.urlopen(
+            with urllib.request.urlopen(
                 f"http://{host}:{port}{path}", timeout=5
-            )
-            return req.status == 200
+            ) as req:
+                return req.status == 200
         except Exception:
             return False
 
@@ -141,10 +142,10 @@ class Watchdog:
 
         try:
             import json
-            req = urllib.request.urlopen(
+            with urllib.request.urlopen(
                 f"http://{host}:{port}/metrics", timeout=5
-            )
-            text = req.read().decode("utf-8")
+            ) as req:
+                text = req.read().decode("utf-8")
             # Parse simple Prometheus text format for key metrics
             metrics = {}
             for line in text.split("\n"):
@@ -198,10 +199,10 @@ class Watchdog:
             if self.max_uptime_hours is not None and server == "cpu":
                 try:
                     import json
-                    req = urllib.request.urlopen(
+                    with urllib.request.urlopen(
                         f"http://{check_host}:{check_port}/health", timeout=5
-                    )
-                    health_data = json.loads(req.read().decode("utf-8"))
+                    ) as req:
+                        health_data = json.loads(req.read().decode("utf-8"))
                     uptime_seconds = health_data.get("uptime_seconds", 0)
                     max_uptime_seconds = self.max_uptime_hours * 3600
                     if uptime_seconds > 0 and uptime_seconds > max_uptime_seconds:
@@ -294,10 +295,10 @@ class Watchdog:
                     # Get detailed metrics for latency
                     try:
                         import json
-                        req = urllib.request.urlopen(
+                        with urllib.request.urlopen(
                             f"http://{check_host}:{check_port}/v1/metrics/detailed", timeout=5
-                        )
-                        detailed = json.loads(req.read().decode("utf-8"))
+                        ) as req:
+                            detailed = json.loads(req.read().decode("utf-8"))
                         completed = detailed.get("completed", {})
                         avg_latency = completed.get("avg_token_latency_ms", 0)
                         if avg_latency > 0 and avg_latency > self.max_latency_ms:
@@ -330,10 +331,10 @@ class Watchdog:
 
             # Get current batch status to see current concurrency
             import json
-            req = urllib.request.urlopen(
+            with urllib.request.urlopen(
                 f"http://{host}:{port}/v1/batch/status", timeout=5
-            )
-            batch_status = json.loads(req.read().decode("utf-8"))
+            ) as req:
+                batch_status = json.loads(req.read().decode("utf-8"))
             current_max = batch_status.get("max_batch_size", 8)
             new_max = max(current_max // 2, self.min_concurrent_requests)
 

@@ -172,7 +172,8 @@ class AlertManager:
             method="POST",
         )
         try:
-            urllib.request.urlopen(req, timeout=timeout)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp.read()
             return True
         except Exception as e:  # noqa BLE001
             print(f"[Alert] Webhook failed ({url}): {e}", flush=True)

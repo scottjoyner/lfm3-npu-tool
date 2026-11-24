@@ -640,6 +640,13 @@ def cmd_cost_calculate(args) -> int:
     """Calculate cost for token counts."""
     from lfm3_npu.cost_tracking import CostTracker
 
+    if args.input_tokens < 0:
+        print(f"Error: input-tokens must be >= 0, got {args.input_tokens}")
+        return 1
+    if args.output_tokens < 0:
+        print(f"Error: output-tokens must be >= 0, got {args.output_tokens}")
+        return 1
+
     tracker = CostTracker()
     cost = tracker.calculate_cost(
         args.input_tokens, args.output_tokens, args.tier
@@ -1106,9 +1113,18 @@ def cmd_autoscaler_policy(args) -> int:
     scaler = AutoScaler()
     policy = scaler.get_policy()
     if args.min_replicas is not None:
+        if args.min_replicas < 0:
+            print(f"Error: min-replicas must be >= 0, got {args.min_replicas}")
+            return 1
         policy.min_replicas = args.min_replicas
     if args.max_replicas is not None:
+        if args.max_replicas < 1:
+            print(f"Error: max-replicas must be >= 1, got {args.max_replicas}")
+            return 1
         policy.max_replicas = args.max_replicas
+    if policy.min_replicas > policy.max_replicas:
+        print(f"Error: min-replicas ({policy.min_replicas}) must be <= max-replicas ({policy.max_replicas})")
+        return 1
     if args.target_cpu is not None:
         policy.target_cpu_percent = args.target_cpu
     if args.target_memory is not None:
@@ -1170,6 +1186,9 @@ def cmd_abtest_create(args) -> int:
 
     manager = get_ab_test_manager()
     try:
+        if not 0 <= args.traffic_split <= 1:
+            print(f"Error: traffic-split must be between 0 and 1, got {args.traffic_split}")
+            return 1
         test = manager.create_test(
             args.test_id, args.name, args.control_model, args.treatment_model,
             args.traffic_split, args.description
@@ -1918,9 +1937,13 @@ def cmd_backup(args) -> int:
         return 0
 
     elif args.backup_action == "delete":
-        bm.delete_backup(args.backup_name)
-        print(f"Backup '{args.backup_name}' deleted.")
-        return 0
+        result = bm.delete_backup(args.backup_name)
+        if result:
+            print(f"Backup '{args.backup_name}' deleted.")
+            return 0
+        else:
+            print(f"Backup '{args.backup_name}' not found.")
+            return 1
 
     return 1
 
@@ -3534,6 +3557,10 @@ def cmd_tenant_create(args) -> int:
     import urllib.request
     import json
 
+    if not args.tenant_id or not args.tenant_id.strip():
+        print("Error: tenant ID cannot be empty")
+        return 1
+
     payload = {
         "tenant_id": args.tenant_id,
         "name": args.name,
@@ -3737,6 +3764,10 @@ def cmd_model_register(args) -> int:
     """Register a new model version."""
     import urllib.request
     import json
+
+    if not args.version or not args.version.strip():
+        print("Error: model version cannot be empty")
+        return 1
 
     payload = {
         "version": args.version,

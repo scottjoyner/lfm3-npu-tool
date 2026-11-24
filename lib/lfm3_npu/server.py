@@ -216,6 +216,7 @@ class ServerManager:
         )
         pidf.write(str(proc.pid))
         pidf.close()
+        logf.close()
 
         # Wait for server to be ready
         ready = self._wait_for_ready(host, port, health_path=health_path)
