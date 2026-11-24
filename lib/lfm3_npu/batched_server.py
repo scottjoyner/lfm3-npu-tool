@@ -236,6 +236,7 @@ _request_metrics: Dict[str, Dict] = {}
 
 # Per-endpoint metrics tracking
 _endpoint_metrics: Dict[str, Dict[str, Any]] = {}
+_endpoint_metrics_lock = asyncio.Lock()
 
 # Token usage tracking per API key (hash -> {prompt_tokens, completion_tokens, total_tokens, request_count})
 _token_usage: Dict[str, Dict[str, int]] = {}
@@ -243,6 +244,10 @@ _token_usage_lock = asyncio.Lock()
 
 # Per-key token quotas (hash -> max_tokens per period, 0 = unlimited)
 _token_quotas: Dict[str, int] = {}
+_token_quotas_lock = asyncio.Lock()
+
+# Lock for shared state (_pending, _active, _endpoint_metrics, _request_metrics)
+_server_state_lock = asyncio.Lock()
 
 # Request tracing - correlation ID support
 _REQUEST_ID_HEADER = "X-Request-ID"
@@ -302,39 +307,41 @@ async def _get_trace_history(limit: int = 50, provider: str = None,
 _REQUEST_ID_HEADER = "X-Request-ID"
 
 
-def _record_endpoint_metric(endpoint: str, duration_ms: float, status: int, error: bool = False) -> None:
+async def _record_endpoint_metric(endpoint: str, duration_ms: float, status: int, error: bool = False) -> None:
     """Record per-endpoint latency and count metrics."""
-    if endpoint not in _endpoint_metrics:
-        _endpoint_metrics[endpoint] = {
-            "request_count": 0,
-            "error_count": 0,
-            "total_latency_ms": 0.0,
-            "max_latency_ms": 0.0,
-            "min_latency_ms": float("inf"),
-        }
-    m = _endpoint_metrics[endpoint]
-    m["request_count"] += 1
-    m["total_latency_ms"] += duration_ms
-    m["max_latency_ms"] = max(m["max_latency_ms"], duration_ms)
-    m["min_latency_ms"] = min(m["min_latency_ms"], duration_ms)
-    if error:
-        m["error_count"] += 1
+    async with _endpoint_metrics_lock:
+        if endpoint not in _endpoint_metrics:
+            _endpoint_metrics[endpoint] = {
+                "request_count": 0,
+                "error_count": 0,
+                "total_latency_ms": 0.0,
+                "max_latency_ms": 0.0,
+                "min_latency_ms": float("inf"),
+            }
+        m = _endpoint_metrics[endpoint]
+        m["request_count"] += 1
+        m["total_latency_ms"] += duration_ms
+        m["max_latency_ms"] = max(m["max_latency_ms"], duration_ms)
+        m["min_latency_ms"] = min(m["min_latency_ms"], duration_ms)
+        if error:
+            m["error_count"] += 1
 
 
-def _get_endpoint_metrics() -> Dict[str, Any]:
+async def _get_endpoint_metrics() -> Dict[str, Any]:
     """Get aggregated endpoint metrics with computed averages."""
-    result = {}
-    for ep, m in _endpoint_metrics.items():
-        count = m["request_count"]
-        result[ep] = {
-            "request_count": count,
-            "error_count": m["error_count"],
-            "error_rate": round(m["error_count"] / count, 4) if count > 0 else 0.0,
-            "avg_latency_ms": round(m["total_latency_ms"] / count, 2) if count > 0 else 0.0,
-            "max_latency_ms": round(m["max_latency_ms"], 2),
-            "min_latency_ms": round(m["min_latency_ms"], 2) if m["min_latency_ms"] != float("inf") else 0.0,
-        }
-    return result
+    async with _endpoint_metrics_lock:
+        result = {}
+        for ep, m in _endpoint_metrics.items():
+            count = m["request_count"]
+            result[ep] = {
+                "request_count": count,
+                "error_count": m["error_count"],
+                "error_rate": round(m["error_count"] / count, 4) if count > 0 else 0.0,
+                "avg_latency_ms": round(m["total_latency_ms"] / count, 2) if count > 0 else 0.0,
+                "max_latency_ms": round(m["max_latency_ms"], 2),
+                "min_latency_ms": round(m["min_latency_ms"], 2) if m["min_latency_ms"] != float("inf") else 0.0,
+            }
+        return result
 
 
 # --------------------------------------------------------------------------- #
@@ -669,27 +676,34 @@ async def _batch_loop():
                     "top_p": top_p,
                     "max_tokens": max_tokens,
                 }
-                _pending.append(req)
-                result_queues[req_id] = result_q
-                req_meta[req_id] = req.meta
+                async with _server_state_lock:
+                    _pending.append(req)
+                    result_queues[req_id] = result_q
+                    req_meta[req_id] = req.meta
 
             # --- Fast path: single pending request, no active requests ---
             # Bypass batch loop overhead for minimum latency on isolated requests
-            if len(_pending) == 1 and not _active and batcher._free_slots:
-                req = _pending.pop(0)
-                slot = batcher._free_slots.pop(0)
-                req.slot = slot
-                batcher._slots[slot] = req
+            async with _server_state_lock:
+                if len(_pending) == 1 and not _active and batcher._free_slots:
+                    req = _pending.pop(0)
+                    slot = batcher._free_slots.pop(0)
+                    req.slot = slot
+                    batcher._slots[slot] = req
+                    has_fast_path = True
+                else:
+                    has_fast_path = False
 
+            if has_fast_path:
                 result = await batcher.fast_path_generate_single(req)
                 req_id, next_token, finished, finish_reason, ttft = result
 
-                _request_metrics[req_id] = {
-                    "ttft": ttft,
-                    "tokens": 0,
-                    "token_times": [],
-                    "finished": finished,
-                }
+                async with _server_state_lock:
+                    _request_metrics[req_id] = {
+                        "ttft": ttft,
+                        "tokens": 0,
+                        "token_times": [],
+                        "finished": finished,
+                    }
 
                 if finished:
                     batcher.finish_request(req, finish_reason or "stop")
@@ -700,9 +714,10 @@ async def _batch_loop():
                         "ttft": ttft,
                     })
                 else:
-                    _active.append(req)
+                    async with _server_state_lock:
+                        _active.append(req)
+                        _request_metrics[req_id]["tokens"] += 1
                     token_text = tokenizer.decode([next_token])
-                    _request_metrics[req_id]["tokens"] += 1
                     await result_queues[req_id].put({
                         "token": token_text,
                         "finished": False,
@@ -714,11 +729,12 @@ async def _batch_loop():
             elif _pending and batcher._free_slots:
                 # When batching is disabled, prefill one request at a time
                 # (minimum latency, no throughput batching).
-                num_slots = len(batcher._free_slots)
-                if not _ENABLE_REQUEST_BATCHING:
-                    num_slots = 1
-                to_prefill = _pending[:num_slots]
-                _pending = _pending[num_slots:]
+                async with _server_state_lock:
+                    num_slots = len(batcher._free_slots)
+                    if not _ENABLE_REQUEST_BATCHING:
+                        num_slots = 1
+                    to_prefill = _pending[:num_slots]
+                    _pending = _pending[num_slots:]
 
                 prefill_results = await batcher.prefill_batch(to_prefill)
                 for req, (req_id, logits) in zip(to_prefill, prefill_results):
@@ -729,22 +745,25 @@ async def _batch_loop():
                     req.generated_ids.append(next_token)
                     req.first_token_time = time.perf_counter()
 
-                    _request_metrics[req_id] = {
-                        "ttft": time.perf_counter() - req.prefill_start if req.prefill_start else 0.0,
-                        "tokens": 0,
-                        "token_times": [],
-                        "finished": False,
-                    }
+                    async with _server_state_lock:
+                        _request_metrics[req_id] = {
+                            "ttft": time.perf_counter() - req.prefill_start if req.prefill_start else 0.0,
+                            "tokens": 0,
+                            "token_times": [],
+                            "finished": False,
+                        }
 
                     if next_token == EOS_TOKEN_ID:
                         req.finished = True
                         req.finished_reason = "stop"
                         batcher.finish_request(req, "stop")
                     else:
-                        _active.append(req)
+                        async with _server_state_lock:
+                            _active.append(req)
 
                     token_text = tokenizer.decode([next_token])
-                    _request_metrics[req_id]["tokens"] += 1
+                    async with _server_state_lock:
+                        _request_metrics[req_id]["tokens"] += 1
                     await result_queues[req_id].put({
                         "token": token_text,
                         "finished": req.finished,
@@ -753,30 +772,36 @@ async def _batch_loop():
                     })
 
             # --- Decode active requests (batched with KV cache padding) ---
-            if _active:
+            async with _server_state_lock:
+                active_snapshot = list(_active)
+
+            if active_snapshot:
                 still_active: List[ReqState] = []
-                for req in _active:
+                for req in active_snapshot:
                     req.temperature = req_meta[req.req_id]["temperature"]
                     req.top_p = req_meta[req.req_id]["top_p"]
                     req.max_tokens = req_meta[req.req_id]["max_tokens"]
 
                 # Use batched decode with padding when multiple active requests,
                 # single-request fast path decode when only one
-                if len(_active) == 1:
-                    req = _active[0]
+                if len(active_snapshot) == 1:
+                    req = active_snapshot[0]
                     result = await batcher.fast_path_decode_single(req)
                     req_id, next_token, finished, finish_reason, token_time = result
                     token_text = tokenizer.decode([next_token])
 
                     if req_id in _request_metrics:
-                        _request_metrics[req_id]["tokens"] += 1
-                        _request_metrics[req_id]["token_times"].append(token_time)
+                        async with _server_state_lock:
+                            _request_metrics[req_id]["tokens"] += 1
+                            _request_metrics[req_id]["token_times"].append(token_time)
 
                     if finished:
                         batcher.finish_request(req, finish_reason or "stop")
-                        _request_metrics[req_id]["finished"] = True
+                        async with _server_state_lock:
+                            _request_metrics[req_id]["finished"] = True
                     else:
-                        still_active.append(req)
+                        async with _server_state_lock:
+                            still_active.append(req)
 
                     await result_queues[req_id].put({
                         "token": token_text,
@@ -784,19 +809,22 @@ async def _batch_loop():
                         "finish_reason": finish_reason,
                     })
                 else:
-                    decode_results = await batcher.decode_batched(_active)
-                    for req, (req_id, next_token, finished, finish_reason, token_time) in zip(_active, decode_results):
+                    decode_results = await batcher.decode_batched(active_snapshot)
+                    for req, (req_id, next_token, finished, finish_reason, token_time) in zip(active_snapshot, decode_results):
                         token_text = tokenizer.decode([next_token])
 
                         if req_id in _request_metrics:
-                            _request_metrics[req_id]["tokens"] += 1
-                            _request_metrics[req_id]["token_times"].append(token_time)
+                            async with _server_state_lock:
+                                _request_metrics[req_id]["tokens"] += 1
+                                _request_metrics[req_id]["token_times"].append(token_time)
 
                         if finished:
                             batcher.finish_request(req, finish_reason or "stop")
-                            _request_metrics[req_id]["finished"] = True
+                            async with _server_state_lock:
+                                _request_metrics[req_id]["finished"] = True
                         else:
-                            still_active.append(req)
+                            async with _server_state_lock:
+                                still_active.append(req)
 
                         await result_queues[req_id].put({
                             "token": token_text,
@@ -804,7 +832,8 @@ async def _batch_loop():
                             "finish_reason": finish_reason,
                         })
 
-                _active = still_active
+                async with _server_state_lock:
+                    _active = still_active
 
             # Yield control only when no work was done this iteration
             if item is None and not _pending and not _active:
@@ -1134,7 +1163,7 @@ async def endpoint_metrics(request: Request, _=Depends(verify_api_key)):
         _rbac_auth.require_permission(key_info, "read", "/v1/metrics/endpoints")
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    return _get_endpoint_metrics()
+    return await _get_endpoint_metrics()
 
 
 @app.get("/v1/fleet/status")
@@ -1467,7 +1496,7 @@ async def _chat_completions_impl(
         duration_ms = (time.perf_counter() - start_time) * 1000
 
         # Record per-endpoint metrics
-        _record_endpoint_metric(endpoint, duration_ms, 200, error=False)
+        await _record_endpoint_metric(endpoint, duration_ms, 200, error=False)
 
         # Record in metrics collector
         if metrics:
