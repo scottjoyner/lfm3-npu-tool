@@ -177,7 +177,7 @@ class MetricsCollector:
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 resp_data = resp.read()
-            return json.loads(req.read().decode("utf-8"))
+            return json.loads(resp_data.decode("utf-8"))
         except Exception:
             return None
 

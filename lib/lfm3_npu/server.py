@@ -204,16 +204,20 @@ class ServerManager:
 
         logf = logf_path.open("w")
         pidf = pid_file(server).open("w")
-
-        print(f"Starting {server.upper()} server on {host}:{port}...", flush=True)
-        proc = subprocess.Popen(
-            cmd,
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            env=env,
-            cwd="/media/scott/data/lfm3-npu-tool",
-            start_new_session=True,
-        )
+        try:
+            print(f"Starting {server.upper()} server on {host}:{port}...", flush=True)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                env=env,
+                cwd="/media/scott/data/lfm3-npu-tool",
+                start_new_session=True,
+            )
+        except Exception:
+            logf.close()
+            pidf.close()
+            raise
         pidf.write(str(proc.pid))
         pidf.close()
         logf.close()
@@ -271,7 +275,10 @@ class ServerManager:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            proc.wait()
+            try:
+                proc.wait(timeout=10)
+            except psutil.TimeoutExpired:
+                print(f"{server.upper()} server (PID: {pid}) did not terminate after SIGKILL.", flush=True)
         except ProcessLookupError:
             pass
 
