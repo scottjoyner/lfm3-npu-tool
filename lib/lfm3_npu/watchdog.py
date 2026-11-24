@@ -482,7 +482,6 @@ class Watchdog:
 
     def get_status(self, servers: Optional[List[str]] = None) -> Dict[str, Dict]:
         """Get detailed status for all servers.
-
         Returns:
             Dictionary mapping server name to status info.
         """
