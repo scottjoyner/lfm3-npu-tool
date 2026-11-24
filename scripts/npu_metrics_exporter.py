@@ -175,7 +175,8 @@ class MetricsCollector:
     def fetch_json(self, url: str, timeout: float = 10.0):
         """Fetch JSON from URL, return None on failure."""
         try:
-            req = urllib.request.urlopen(url, timeout=timeout)
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                resp_data = resp.read()
             return json.loads(req.read().decode("utf-8"))
         except Exception:
             return None

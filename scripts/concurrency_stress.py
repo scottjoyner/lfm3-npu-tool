@@ -121,9 +121,13 @@ def run_stress(server, concurrency, total_requests):
     # Check reachable
     try:
         if server == "cpu":
-            urllib.request.urlopen(f"http://{CPU_HOST}:{CPU_PORT}/health", timeout=5)
+            with urllib.request.urlopen(f"http://{CPU_HOST}:{CPU_PORT}/health", timeout=5) as resp:
+                resp.read()
+
         else:
-            urllib.request.urlopen(f"http://{NPU_HOST}:{NPU_PORT}/v1/models", timeout=5)
+            with urllib.request.urlopen(f"http://{NPU_HOST}:{NPU_PORT}/v1/models", timeout=5) as resp:
+                resp.read()
+
     except Exception as e:
         print(f"Server {server} not reachable: {e}")
         return None

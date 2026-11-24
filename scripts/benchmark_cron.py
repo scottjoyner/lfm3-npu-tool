@@ -31,7 +31,8 @@ def log(msg):
 
 def fetch_json(url, timeout=10):
     try:
-        req = urllib.request.urlopen(url, timeout=timeout)
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            resp_data = resp.read()
         return json.loads(req.read().decode("utf-8")), None
     except Exception as e:
         return None, str(e)

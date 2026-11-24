@@ -46,7 +46,8 @@ def run_cmd(cmd):
 
 def fetch_json(url, timeout=10):
     try:
-        req = urllib.request.urlopen(url, timeout=timeout)
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            resp_data = resp.read()
         return json.loads(req.read().decode("utf-8")), None
     except Exception as e:
         return None, str(e)
@@ -104,7 +105,8 @@ def main():
     # 4. Metrics exporter
     print("\n--- Metrics Exporter ---")
     try:
-        req = urllib.request.urlopen(f"http://localhost:{METRICS_PORT}/metrics", timeout=10)
+        with urllib.request.urlopen(f"http://localhost:{METRICS_PORT}/metrics", timeout=10) as resp:
+            resp_data = resp.read()
         body = req.read().decode("utf-8")
         check("lfm3_npu_up 1" in body, "NPU up metric present")
         check("lfm3_cpu_up" in body, "CPU up metric present")

@@ -51,7 +51,8 @@ def log(msg, verbose=False):
 
 def fetch_json(url, timeout=10):
     try:
-        req = urllib.request.urlopen(url, timeout=timeout)
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            resp_data = resp.read()
         return json.loads(req.read().decode("utf-8")), None
     except Exception as e:
         return None, str(e)
@@ -107,7 +108,8 @@ def check_metrics_exporter():
 
     checks_total += 1
     try:
-        req = urllib.request.urlopen(f"http://localhost:{METRICS_PORT}/metrics", timeout=10)
+        with urllib.request.urlopen(f"http://localhost:{METRICS_PORT}/metrics", timeout=10) as resp:
+            resp_data = resp.read()
         body = req.read().decode("utf-8")
         if "lfm3_npu_up 1" in body:
             print(f"  [PASS] Metrics exporter (port {METRICS_PORT})")
