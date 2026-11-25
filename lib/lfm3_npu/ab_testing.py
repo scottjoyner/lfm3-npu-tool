@@ -482,6 +482,17 @@ class ABTestManager:
 
     def promote_winner(self, test_id: str) -> Optional[str]:
         """Promote the winning variant to production."""
+
+    def promote_winner(self, test_id: str) -> Optional[str]:
+        """Promote the winning variant of an A/B test to production."""
+        test = self._tests.get(test_id)
+        if test is None or test.winner_variant_id is None:
+            return None
+        # Return the winning variant model version
+        for variant in test.variants:
+            if variant.variant_id == test.winner_variant_id:
+                return variant.model_version
+        return None
         analysis = self.analyze_test(test_id)
         if "error" in analysis:
             return None
