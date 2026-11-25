@@ -230,5 +230,3 @@ class CanaryPromotionManager:
     def get_promotion_history(self) -> List[PromotionDecision]:
         """Get the promotion history."""
         return self._promotion_history
-PYEOF
-echo "Created canary_promotion.py"
