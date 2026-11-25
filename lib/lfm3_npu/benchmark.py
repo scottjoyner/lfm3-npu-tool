@@ -411,7 +411,7 @@ def bench_concurrency(
     tokenizer_path: str,
     prompt: str = "The quick brown fox jumps over the lazy dog",
     max_tokens: int = 50,
-    concurrency_levels: List[int] = [1, 2, 4, 8],
+    concurrency_levels: Optional[List[int]] = None,
     config: Optional[Config] = None,
 ) -> Dict[str, Any]:
     """Run benchmarks at different concurrency levels."""
